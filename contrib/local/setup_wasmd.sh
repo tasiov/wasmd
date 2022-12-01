@@ -11,6 +11,12 @@ wasmd init --chain-id "$CHAIN_ID" "$MONIKER"
 # staking/governance token is hardcoded in config, change this
 ## OSX requires: -i.
 sed -i. "s/\"stake\"/\"$STAKE\"/" "$HOME"/.wasmd/config/genesis.json
+
+# set chain-id to "testing"
+sed -i. "s/chain-id\ =\ \"\"/chain-id\ =\ \"testing\"/" "$HOME"/.wasmd/config/client.toml
+# set keyring-backend to "test"
+sed -i. "s/keyring-backend\ =\ \"os\"/keyring-backend\ =\ \"test\"/" "$HOME"/.wasmd/config/client.toml
+
 if ! wasmd keys show validator; then
   (
     echo "$PASSWORD"
@@ -22,6 +28,10 @@ echo "$PASSWORD" | wasmd add-genesis-account validator "1000000000$STAKE,1000000
 # (optionally) add a few more genesis accounts
 for addr in "$@"; do
   echo "$addr"
+    (
+    echo "$PASSWORD"
+    echo "$PASSWORD"
+  ) | wasmd keys add "$addr"
   wasmd add-genesis-account "$addr" "1000000000$STAKE,1000000000$FEE"
 done
 # submit a genesis validator tx
