@@ -352,7 +352,7 @@ func (k Keeper) instantiate(
 	prefixStore := prefix.NewStore(ctx.KVStore(k.storeKey), prefixStoreKey)
 
 	// INDEXER: Listen to KV Store changes.
-	listenStore := k.listenToPrefixStore(prefixStore, ctx, contractAddress, codeID, creator.String(), admin.String(), label, creator, initMsg)
+	listenStore, listener := k.listenToPrefixStore(prefixStore, ctx, "INSTANTIATE", contractAddress, codeID, creator.String(), admin.String(), label, creator, initMsg)
 
 	// prepare querier
 	querier := k.newQueryHandler(ctx, contractAddress)
@@ -401,6 +401,9 @@ func (k Keeper) instantiate(
 		return nil, nil, sdkerrors.Wrap(err, "dispatch")
 	}
 
+	// LISTENER: On success, commit.
+	listener.commit()
+
 	return contractAddress, data, nil
 }
 
@@ -426,7 +429,7 @@ func (k Keeper) execute(ctx sdk.Context, contractAddress sdk.AccAddress, caller 
 	info := types.NewInfo(caller, coins)
 
 	// INDEXER: Listen to KV Store changes.
-	listenStore := k.listenToPrefixStore(prefixStore, ctx, contractAddress, contractInfo.CodeID, contractInfo.Creator, contractInfo.Admin, contractInfo.Label, caller, msg)
+	listenStore, listener := k.listenToPrefixStore(prefixStore, ctx, "EXECUTE", contractAddress, contractInfo.CodeID, contractInfo.Creator, contractInfo.Admin, contractInfo.Label, caller, msg)
 
 	// prepare querier
 	querier := k.newQueryHandler(ctx, contractAddress)
@@ -446,6 +449,9 @@ func (k Keeper) execute(ctx sdk.Context, contractAddress sdk.AccAddress, caller 
 	if err != nil {
 		return nil, sdkerrors.Wrap(err, "dispatch")
 	}
+
+	// LISTENER: On success, commit.
+	listener.commit()
 
 	return data, nil
 }
@@ -497,7 +503,7 @@ func (k Keeper) migrate(ctx sdk.Context, contractAddress sdk.AccAddress, caller 
 	prefixStore := prefix.NewStore(ctx.KVStore(k.storeKey), prefixStoreKey)
 
 	// INDEXER: Listen to KV Store changes.
-	listenStore := k.listenToPrefixStore(prefixStore, ctx, contractAddress, contractInfo.CodeID, contractInfo.Creator, contractInfo.Admin, contractInfo.Label, caller, msg)
+	listenStore, listener := k.listenToPrefixStore(prefixStore, ctx, "MIGRATE", contractAddress, contractInfo.CodeID, contractInfo.Creator, contractInfo.Admin, contractInfo.Label, caller, msg)
 
 	gas := k.runtimeGasForContract(ctx)
 	res, gasUsed, err := k.wasmVM.Migrate(newCodeInfo.CodeHash, env, msg, listenStore, cosmwasmAPI, &querier, k.gasMeter(ctx), gas, costJSONDeserialization)
@@ -523,6 +529,9 @@ func (k Keeper) migrate(ctx sdk.Context, contractAddress sdk.AccAddress, caller 
 	if err != nil {
 		return nil, sdkerrors.Wrap(err, "dispatch")
 	}
+
+	// LISTENER: On success, commit.
+	listener.commit()
 
 	return data, nil
 }
@@ -578,7 +587,7 @@ func (k Keeper) reply(ctx sdk.Context, contractAddress sdk.AccAddress, reply was
 	env := types.NewEnv(ctx, contractAddress)
 
 	// INDEXER: Listen to KV Store changes.
-	listenStore := k.listenToPrefixStore(prefixStore, ctx, contractAddress, contractInfo.CodeID, contractInfo.Creator, contractInfo.Admin, contractInfo.Label, nil, nil)
+	listenStore, listener := k.listenToPrefixStore(prefixStore, ctx, "REPLY", contractAddress, contractInfo.CodeID, contractInfo.Creator, contractInfo.Admin, contractInfo.Label, nil, nil)
 
 	// prepare querier
 	querier := k.newQueryHandler(ctx, contractAddress)
@@ -599,6 +608,9 @@ func (k Keeper) reply(ctx sdk.Context, contractAddress sdk.AccAddress, reply was
 	if err != nil {
 		return nil, sdkerrors.Wrap(err, "dispatch")
 	}
+
+	// LISTENER: On success, commit.
+	listener.commit()
 
 	return data, nil
 }
@@ -793,25 +805,27 @@ func (k Keeper) contractInstance(ctx sdk.Context, contractAddress sdk.AccAddress
 }
 
 // Listen to KV Store changes.
-func (k Keeper) listenToPrefixStore(prefixStore prefix.Store, ctx sdk.Context, contractAddress sdk.AccAddress, codeID uint64, creatorAddress string, adminAddress string, label string, callerAddress sdk.AccAddress, msg []byte) *listenkv.Store {
+func (k Keeper) listenToPrefixStore(prefixStore prefix.Store, ctx sdk.Context, source string, contractAddress sdk.AccAddress, codeID uint64, creatorAddress string, adminAddress string, label string, callerAddress sdk.AccAddress, msg []byte) (*listenkv.Store, *IndexerWriteListener) {
+	listener := NewIndexerWriteListener(
+		ctx,
+		source,
+
+		// Contract info.
+		contractAddress,
+		codeID,
+		creatorAddress,
+		adminAddress,
+		label,
+
+		callerAddress,
+		msg,
+	)
 	listeners := []sdkstore.WriteListener{
-		&IndexerWriteListener{
-			ctx: &ctx,
-
-			// Contract info.
-			contractAddress: contractAddress.String(),
-			codeID:          codeID,
-			creatorAddress:  creatorAddress,
-			adminAddress:    adminAddress,
-			label:           label,
-			msg:             string(msg),
-
-			callerAddress: callerAddress.String(),
-		},
+		listener,
 	}
 
 	// Store key does not matter.
-	return listenkv.NewStore(prefixStore, k.storeKey, listeners)
+	return listenkv.NewStore(prefixStore, k.storeKey, listeners), listener
 }
 
 func (k Keeper) GetContractInfo(ctx sdk.Context, contractAddress sdk.AccAddress) *types.ContractInfo {
