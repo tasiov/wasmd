@@ -578,10 +578,14 @@ func (k Keeper) Sudo(ctx sdk.Context, contractAddress sdk.AccAddress, msg []byte
 
 	env := types.NewEnv(ctx, contractAddress)
 
+	// INDEXER: Listen to KV Store changes.
+	listenStore, listener := k.listenToPrefixStore(prefixStore, &ctx, contractAddress, contractInfo.CodeID)
+	defer listener.finish()
+
 	// prepare querier
 	querier := k.newQueryHandler(ctx, contractAddress)
 	gas := k.runtimeGasForContract(ctx)
-	res, gasUsed, execErr := k.wasmVM.Sudo(codeInfo.CodeHash, env, msg, prefixStore, cosmwasmAPI, querier, k.gasMeter(ctx), gas, costJSONDeserialization)
+	res, gasUsed, execErr := k.wasmVM.Sudo(codeInfo.CodeHash, env, msg, listenStore, cosmwasmAPI, querier, k.gasMeter(ctx), gas, costJSONDeserialization)
 	k.consumeRuntimeGas(ctx, gasUsed)
 	if execErr != nil {
 		return nil, sdkerrors.Wrap(types.ErrExecuteFailed, execErr.Error())
@@ -596,6 +600,9 @@ func (k Keeper) Sudo(ctx sdk.Context, contractAddress sdk.AccAddress, msg []byte
 	if err != nil {
 		return nil, sdkerrors.Wrap(err, "dispatch")
 	}
+
+	// INDEXER: On success, commit.
+	listener.commit()
 
 	return data, nil
 }
