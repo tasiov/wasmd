@@ -108,6 +108,9 @@ type Keeper struct {
 	maxQueryStackSize    uint32
 	acceptedAccountTypes map[reflect.Type]struct{}
 	accountPruner        AccountPruner
+
+	// INDEXER.
+	indexerConfig IndexerConfig
 }
 
 // NewKeeper creates a new contract Keeper instance
@@ -155,6 +158,7 @@ func NewKeeper(
 		gasRegister:          NewDefaultWasmGasRegister(),
 		maxQueryStackSize:    types.DefaultMaxQueryStackSize,
 		acceptedAccountTypes: defaultAcceptedAccountTypes,
+		indexerConfig:        LoadIndexerConfig(filepath.Join(homeDir, "..")),
 	}
 	keeper.wasmVMQueryHandler = DefaultQueryPlugins(bankKeeper, stakingKeeper, distKeeper, channelKeeper, keeper)
 	for _, o := range opts {
@@ -175,12 +179,19 @@ func (k Keeper) attachIndexer(prefixStore *prefix.Store, ctx *sdk.Context, contr
 
 	// Create new listener.
 	listener := NewIndexerWriteListener(
+		k.indexerConfig,
 		CurrentIndexerListener,
 		ctx,
 		// Contract info.
 		contractAddress,
 		codeID,
 	)
+
+	// If we fail to create a new listener, return prefixStore not wrapped with
+	// listenkv. This may happen if a config filter is not met.
+	if listener == nil {
+		return prefixStore, nil
+	}
 
 	// Update CurrentIndexerListener.
 	CurrentIndexerListener = listener
