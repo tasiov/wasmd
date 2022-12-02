@@ -25,7 +25,7 @@ type IndexerWriteListener struct {
 	logger                log.Logger
 
 	queue     []PendingIndexerEvent
-	succeeded bool
+	committed bool
 
 	// Contract info.
 	contractAddress string
@@ -40,7 +40,7 @@ func NewIndexerWriteListener(parentIndexerListener *IndexerWriteListener, ctx *s
 		logger:                ctx.Logger(),
 
 		queue:     make([]PendingIndexerEvent, 0),
-		succeeded: false,
+		committed: false,
 
 		// Contract info.
 		contractAddress: contractAddress.String(),
@@ -65,26 +65,30 @@ func (wl *IndexerWriteListener) OnWrite(storeKey sdkstoretypes.StoreKey, key []b
 	return nil
 }
 
-// Commit entire queue.
+// Commit entire queue. This should be called if the transaction succeeds.
 func (wl *IndexerWriteListener) commit() {
-	// Add all events to parent listener queue if exists, and mark succeeded.
+	// Add all events to parent listener queue if exists.
 	if wl.parentIndexerListener != nil {
 		wl.parentIndexerListener.queue = append(wl.parentIndexerListener.queue, wl.queue...)
 	}
-	wl.succeeded = true
+	wl.committed = true
 }
 
-// Finish.
+// If we failed to commit or are not the parent listener, don't export the
+// queue. If we are not the root listener, we added our events to our parent's
+// queue when we committed. Our child listeners added their events to our queue
+// if they committed. The root (parent with no parent) listener will export the
+// whole queue (below) if it commits.
 func (wl *IndexerWriteListener) finish() {
-	// If we failed or are not the parent listener, move the current indexer
-	// listener back one. Our child listeners added to our queue when they
-	// committed. The parent listener will export the whole queue once it
-	// finishes.
-	if !wl.succeeded || wl.parentIndexerListener != nil {
-		CurrentIndexerListener = wl.parentIndexerListener
+	// Move the current indexer listener pointer up one to our parent. If we are
+	// the root listener, this will be nil.
+	CurrentIndexerListener = wl.parentIndexerListener
+
+	if !wl.committed || wl.parentIndexerListener != nil {
 		return
 	}
 
+	// Export entire queue.
 	for _, event := range wl.queue {
 		suffix := fmt.Sprintf("Info:\n  blockHeight = %d\n  blockTimeUnixMs = %d\n  contractAddress = %s\n  codeID = %d\n", event.blockHeight, event.blockTimeUnixMs, wl.contractAddress, wl.codeID)
 
@@ -94,8 +98,4 @@ func (wl *IndexerWriteListener) finish() {
 			wl.logger.Error(fmt.Sprintf("\n\nset\nkey = %v (%s)\nvalue = %s\n%s", event.key, event.key, event.value, suffix))
 		}
 	}
-
-	// Unset the keeper's current listener since we're done with this chain of
-	// messages.
-	CurrentIndexerListener = nil
 }
