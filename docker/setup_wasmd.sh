@@ -31,3 +31,23 @@ done
 ## should be:
 # (echo "$PASSWORD"; echo "$PASSWORD"; echo "$PASSWORD") | wasmd gentx validator "250000000$STAKE" --chain-id="$CHAIN_ID"
 wasmd collect-gentxs
+
+# add default indexer config if doesn't exist
+INDEXER_CONFIG="$HOME"/.wasmd/indexer/config.json
+if [ -f "$INDEXER_CONFIG" ]; then
+  echo "$INDEXER_CONFIG exists..."
+else
+  echo "$INDEXER_CONFIG does not exist. Generating..."
+
+  mkdir -p "$HOME"/.wasmd/indexer
+
+  cat <<EOF > "$INDEXER_CONFIG"
+{
+  "filters": [
+    {
+      "output": "out.txt"
+    }
+  ]
+}
+EOF
+fi
