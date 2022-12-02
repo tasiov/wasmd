@@ -2,7 +2,6 @@ package keeper
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 
@@ -180,7 +179,7 @@ func (wl *IndexerWriteListener) finish() {
 	// Open output file, creating if doesn't exist.
 	file, err := os.OpenFile(wl.output, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		fmt.Print(err)
+		wl.logger.Error("[INDEXER] Failed to open output file", "output", wl.output, "error", err)
 		panic(err.Error())
 	}
 	defer file.Close()
