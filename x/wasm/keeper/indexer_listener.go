@@ -24,9 +24,6 @@ type IndexerWriteListener struct {
 	parentIndexerListener *IndexerWriteListener
 	logger                log.Logger
 
-	// If checking TX (simulating, not actually executing), do nothing.
-	isCheckTx bool
-
 	queue     []PendingIndexerEvent
 	succeeded bool
 
@@ -42,8 +39,6 @@ func NewIndexerWriteListener(parentIndexerListener *IndexerWriteListener, ctx *s
 		parentIndexerListener: parentIndexerListener,
 		logger:                ctx.Logger(),
 
-		isCheckTx: ctx.IsCheckTx(),
-
 		queue:     make([]PendingIndexerEvent, 0),
 		succeeded: false,
 
@@ -57,11 +52,6 @@ func NewIndexerWriteListener(parentIndexerListener *IndexerWriteListener, ctx *s
 
 // Add write events to queue.
 func (wl *IndexerWriteListener) OnWrite(storeKey sdkstoretypes.StoreKey, key []byte, value []byte, delete bool) error {
-	// If checking TX (simulating, not actually executing), do nothing.
-	if wl.isCheckTx {
-		return nil
-	}
-
 	wl.queue = append(wl.queue, PendingIndexerEvent{
 		blockHeight:     wl.blockHeight,
 		blockTimeUnixMs: wl.blockTimeUnixMs,
@@ -77,11 +67,6 @@ func (wl *IndexerWriteListener) OnWrite(storeKey sdkstoretypes.StoreKey, key []b
 
 // Commit entire queue.
 func (wl *IndexerWriteListener) commit() {
-	// If checking TX (simulating, not actually executing), do nothing.
-	if wl.isCheckTx {
-		return
-	}
-
 	// Add all events to parent listener queue if exists, and mark succeeded.
 	if wl.parentIndexerListener != nil {
 		wl.parentIndexerListener.queue = append(wl.parentIndexerListener.queue, wl.queue...)
