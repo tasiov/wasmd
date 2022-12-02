@@ -5,63 +5,73 @@ import (
 
 	sdkstoretypes "github.com/cosmos/cosmos-sdk/store/types"
 	sdktypes "github.com/cosmos/cosmos-sdk/types"
+	"github.com/tendermint/tendermint/libs/log"
 )
 
-type PendingWrite struct {
-	key    []byte
-	value  []byte
-	delete bool
+type PendingIndexerEvent struct {
+	contractAddress string
+	codeID          uint64
+	blockHeight     int64
+	blockTimeUnixMs int64
+	key             []byte
+	value           []byte
+	delete          bool
 }
 
 // IndexerWriteListener is used to configure listening to a KVStore by writing
 // out to a PostgreSQL DB.
 type IndexerWriteListener struct {
-	queue []PendingWrite
+	parentIndexerListener *IndexerWriteListener
+	logger                log.Logger
 
-	ctx    *sdktypes.Context
-	source string
+	// If checking TX (simulating, not actually executing), do nothing.
+	isCheckTx bool
+
+	queue     []PendingIndexerEvent
+	succeeded bool
 
 	// Contract info.
 	contractAddress string
 	codeID          uint64
-	creatorAddress  string
-	adminAddress    string
-	label           string
-
-	callerAddress string
-	msg           string
+	blockHeight     int64
+	blockTimeUnixMs int64
 }
 
-func NewIndexerWriteListener(ctx sdktypes.Context, source string, contractAddress sdktypes.AccAddress, codeID uint64, creatorAddress string, adminAddress string, label string, callerAddress sdktypes.AccAddress, msg []byte) *IndexerWriteListener {
-	return &IndexerWriteListener{
-		queue: []PendingWrite{},
+func NewIndexerWriteListener(parentIndexerListener *IndexerWriteListener, ctx *sdktypes.Context, contractAddress sdktypes.AccAddress, codeID uint64) *IndexerWriteListener {
+	ctx.Logger().Error(fmt.Sprintf("NewIndexerWriteListener: CurrentIndexerListener: %v", CurrentIndexerListener))
 
-		ctx:    &ctx,
-		source: source,
+	return &IndexerWriteListener{
+		parentIndexerListener: parentIndexerListener,
+		logger:                ctx.Logger(),
+
+		isCheckTx: ctx.IsCheckTx(),
+
+		queue:     make([]PendingIndexerEvent, 0),
+		succeeded: false,
 
 		// Contract info.
 		contractAddress: contractAddress.String(),
 		codeID:          codeID,
-		creatorAddress:  creatorAddress,
-		adminAddress:    adminAddress,
-		label:           label,
-		msg:             string(msg),
-
-		callerAddress: callerAddress.String(),
+		blockHeight:     ctx.BlockHeight(),
+		blockTimeUnixMs: ctx.BlockTime().UnixMicro(),
 	}
 }
 
 // Add write events to queue.
 func (wl *IndexerWriteListener) OnWrite(storeKey sdkstoretypes.StoreKey, key []byte, value []byte, delete bool) error {
 	// If checking TX (simulating, not actually executing), do nothing.
-	if wl.ctx.IsCheckTx() {
+	if wl.isCheckTx {
 		return nil
 	}
 
-	wl.queue = append(wl.queue, PendingWrite{
-		key:    key,
-		value:  value,
-		delete: delete,
+	wl.queue = append(wl.queue, PendingIndexerEvent{
+		blockHeight:     wl.blockHeight,
+		blockTimeUnixMs: wl.blockTimeUnixMs,
+		contractAddress: wl.contractAddress,
+		codeID:          wl.codeID,
+		key:             key,
+		value:           value,
+		delete:          delete,
 	})
 
 	return nil
@@ -70,17 +80,39 @@ func (wl *IndexerWriteListener) OnWrite(storeKey sdkstoretypes.StoreKey, key []b
 // Commit entire queue.
 func (wl *IndexerWriteListener) commit() {
 	// If checking TX (simulating, not actually executing), do nothing.
-	if wl.ctx.IsCheckTx() {
+	if wl.isCheckTx {
 		return
 	}
 
-	suffix := fmt.Sprintf("Info:\n  blockHeight = %d\n  blockTimeUnixMs = %d\n  contractAddress = %s\n  codeID = %d\n  creatorAddress = %s\n  adminAddress = %s\n  label = %s\n  callerAddress = %s\n  msg = %s", wl.ctx.BlockHeight(), wl.ctx.BlockTime().UnixMicro(), wl.contractAddress, wl.codeID, wl.creatorAddress, wl.adminAddress, wl.label, wl.callerAddress, wl.msg)
+	// Add all events to parent listener queue if exists, and mark succeeded.
+	if wl.parentIndexerListener != nil {
+		wl.parentIndexerListener.queue = append(wl.parentIndexerListener.queue, wl.queue...)
+	}
+	wl.succeeded = true
+}
 
-	for _, write := range wl.queue {
-		if write.delete {
-			wl.ctx.Logger().Error(fmt.Sprintf("\n%s delete\nkey = %v (%s)\n%s", wl.source, write.key, write.key, suffix))
+// Finish.
+func (wl *IndexerWriteListener) finish() {
+	// If we failed or are not the parent listener, move the current indexer
+	// listener back one. Our child listeners added to our queue when they
+	// committed. The parent listener will export the whole queue once it
+	// finishes.
+	if !wl.succeeded || wl.parentIndexerListener != nil {
+		CurrentIndexerListener = wl.parentIndexerListener
+		return
+	}
+
+	for _, event := range wl.queue {
+		suffix := fmt.Sprintf("Info:\n  blockHeight = %d\n  blockTimeUnixMs = %d\n  contractAddress = %s\n  codeID = %d\n", event.blockHeight, event.blockTimeUnixMs, wl.contractAddress, wl.codeID)
+
+		if event.delete {
+			wl.logger.Error(fmt.Sprintf("\n\ndelete\nkey = %v (%s)\n%s", event.key, event.key, suffix))
 		} else {
-			wl.ctx.Logger().Error(fmt.Sprintf("\n%s set\nkey = %v (%s)\nvalue = %s\n%s", wl.source, write.key, write.key, write.value, suffix))
+			wl.logger.Error(fmt.Sprintf("\n\nset\nkey = %v (%s)\nvalue = %s\n%s", event.key, event.key, event.value, suffix))
 		}
 	}
+
+	// Unset the keeper's current listener since we're done with this chain of
+	// messages.
+	CurrentIndexerListener = nil
 }
