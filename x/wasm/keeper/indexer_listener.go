@@ -38,8 +38,6 @@ type IndexerWriteListener struct {
 }
 
 func NewIndexerWriteListener(parentIndexerListener *IndexerWriteListener, ctx *sdktypes.Context, contractAddress sdktypes.AccAddress, codeID uint64) *IndexerWriteListener {
-	ctx.Logger().Error(fmt.Sprintf("NewIndexerWriteListener: CurrentIndexerListener: %v", CurrentIndexerListener))
-
 	return &IndexerWriteListener{
 		parentIndexerListener: parentIndexerListener,
 		logger:                ctx.Logger(),
