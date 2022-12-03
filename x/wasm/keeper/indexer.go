@@ -1,6 +1,7 @@
 package keeper
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -13,11 +14,12 @@ import (
 type IndexerConfigFilter struct {
 	CodeIds           []uint64 `json:"codeIds"`
 	ContractAddresses []string `json:"contractAddresses"`
-	Output            string   `json:"output"`
 }
 
 type IndexerConfig struct {
-	Filters []IndexerConfigFilter `json:"filters"`
+	Filter IndexerConfigFilter `json:"filter"`
+	// Set manually.
+	Output string
 }
 
 func LoadIndexerConfig(wasmdDir string) IndexerConfig {
@@ -30,27 +32,12 @@ func LoadIndexerConfig(wasmdDir string) IndexerConfig {
 	jsonParser := json.NewDecoder(configFile)
 	jsonParser.Decode(&config)
 
-	// Validate at least one filter exists.
-	if len(config.Filters) == 0 {
-		panic("indexer.json must have at least one filter")
-	}
-
-	// Validate filters have output set, and resolve path.
-	updatedFilters := config.Filters[:0]
-	for _, f := range config.Filters {
-		if f.Output == "" {
-			panic("indexer.json filters must have output set")
-		}
-
-		// Resolve path.
-		f.Output = filepath.Join(wasmdDir, "indexer/output", f.Output)
-		// Create folder if doesn't exist.
-		dir := filepath.Dir(f.Output)
-		if _, err := os.Stat(dir); os.IsNotExist(err) {
-			os.MkdirAll(dir, os.ModePerm)
-		}
-
-		updatedFilters = append(updatedFilters, f)
+	// Resolve output path.
+	config.Output = filepath.Join(wasmdDir, "indexer", ".events.txt")
+	// Create folder if doesn't exist.
+	dir := filepath.Dir(config.Output)
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		os.MkdirAll(dir, os.ModePerm)
 	}
 
 	return config
@@ -61,8 +48,8 @@ type PendingIndexerEvent struct {
 	BlockTimeUnixMs int64  `json:"blockTimeUnixMs"`
 	ContractAddress string `json:"contractAddress"`
 	CodeId          uint64 `json:"codeId"`
-	Key             []byte `json:"key"`
-	Value           []byte `json:"value"`
+	Key             string `json:"key"`
+	Value           string `json:"value"`
 	Delete          bool   `json:"delete"`
 }
 
@@ -73,7 +60,7 @@ type IndexerWriteListener struct {
 	logger                log.Logger
 	output                string
 
-	queue     []PendingIndexerEvent
+	queue     map[string]PendingIndexerEvent
 	committed bool
 
 	// Contract info.
@@ -84,50 +71,41 @@ type IndexerWriteListener struct {
 }
 
 func NewIndexerWriteListener(config IndexerConfig, parentIndexerListener *IndexerWriteListener, ctx *sdktypes.Context, contractAddress sdktypes.AccAddress, codeID uint64) *IndexerWriteListener {
-	// Find filter match.
-	var filter IndexerConfigFilter
-	found := false
-	for _, f := range config.Filters {
-		// If there are no filters, we match.
-		if len(f.CodeIds) == 0 && len(f.ContractAddresses) == 0 {
-			filter = f
-			found = true
-			break
-		}
+	// If there are any filters set, check them.
+	if len(config.Filter.CodeIds) != 0 || len(config.Filter.ContractAddresses) != 0 {
+		found := false
 
-		// If filters exist, check them.
-		for _, c := range f.CodeIds {
-			if c == codeID {
-				filter = f
-				found = true
-				break
-			}
-		}
-		for _, c := range f.ContractAddresses {
-			if c == contractAddress.String() {
-				filter = f
-				found = true
-				break
+		if len(config.Filter.CodeIds) != 0 {
+			for _, c := range config.Filter.CodeIds {
+				if c == codeID {
+					found = true
+					break
+				}
 			}
 		}
 
-		// If found filter, stop.
-		if found {
-			break
+		// Only check contract addresses if we have not yet found a match.
+		if !found && len(config.Filter.ContractAddresses) != 0 {
+			for _, c := range config.Filter.ContractAddresses {
+				if c == contractAddress.String() {
+					found = true
+					break
+				}
+			}
 		}
-	}
 
-	// If no filter match, don't create listener.
-	if !found {
-		return nil
+		// If filter is set and we didn't find a match, don't create a listener.
+		if !found {
+			return nil
+		}
 	}
 
 	return &IndexerWriteListener{
 		parentIndexerListener: parentIndexerListener,
 		logger:                ctx.Logger(),
-		output:                filter.Output,
+		output:                config.Output,
 
-		queue:     make([]PendingIndexerEvent, 0),
+		queue:     make(map[string]PendingIndexerEvent),
 		committed: false,
 
 		// Contract info.
@@ -140,15 +118,18 @@ func NewIndexerWriteListener(config IndexerConfig, parentIndexerListener *Indexe
 
 // Add write events to queue.
 func (wl *IndexerWriteListener) OnWrite(storeKey sdkstoretypes.StoreKey, key []byte, value []byte, delete bool) error {
-	wl.queue = append(wl.queue, PendingIndexerEvent{
+	keyBase64 := base64.StdEncoding.EncodeToString(key)
+	valueBase64 := base64.StdEncoding.EncodeToString(value)
+
+	wl.queue[keyBase64] = PendingIndexerEvent{
 		BlockHeight:     wl.blockHeight,
 		BlockTimeUnixMs: wl.blockTimeUnixMs,
 		ContractAddress: wl.contractAddress,
 		CodeId:          wl.codeID,
-		Key:             key,
-		Value:           value,
+		Key:             keyBase64,
+		Value:           valueBase64,
 		Delete:          delete,
-	})
+	}
 
 	return nil
 }
@@ -157,7 +138,9 @@ func (wl *IndexerWriteListener) OnWrite(storeKey sdkstoretypes.StoreKey, key []b
 func (wl *IndexerWriteListener) commit() {
 	// Add all events to parent listener queue if exists.
 	if wl.parentIndexerListener != nil {
-		wl.parentIndexerListener.queue = append(wl.parentIndexerListener.queue, wl.queue...)
+		for k, v := range wl.queue {
+			wl.parentIndexerListener.queue[k] = v
+		}
 	}
 	wl.committed = true
 }
