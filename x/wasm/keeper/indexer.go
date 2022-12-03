@@ -14,11 +14,12 @@ import (
 type IndexerConfigFilter struct {
 	CodeIds           []uint64 `json:"codeIds"`
 	ContractAddresses []string `json:"contractAddresses"`
-	Output            string   `json:"output"`
 }
 
 type IndexerConfig struct {
-	Filters []IndexerConfigFilter `json:"filters"`
+	Filter IndexerConfigFilter `json:"filter"`
+	// Set manually.
+	Output string
 }
 
 func LoadIndexerConfig(wasmdDir string) IndexerConfig {
@@ -31,27 +32,12 @@ func LoadIndexerConfig(wasmdDir string) IndexerConfig {
 	jsonParser := json.NewDecoder(configFile)
 	jsonParser.Decode(&config)
 
-	// Validate at least one filter exists.
-	if len(config.Filters) == 0 {
-		panic("indexer.json must have at least one filter")
-	}
-
-	// Validate filters have output set, and resolve path.
-	updatedFilters := config.Filters[:0]
-	for _, f := range config.Filters {
-		if f.Output == "" {
-			panic("indexer.json filters must have output set")
-		}
-
-		// Resolve path.
-		f.Output = filepath.Join(wasmdDir, "indexer/output", f.Output)
-		// Create folder if doesn't exist.
-		dir := filepath.Dir(f.Output)
-		if _, err := os.Stat(dir); os.IsNotExist(err) {
-			os.MkdirAll(dir, os.ModePerm)
-		}
-
-		updatedFilters = append(updatedFilters, f)
+	// Resolve output path.
+	config.Output = filepath.Join(wasmdDir, "indexer", ".events.json")
+	// Create folder if doesn't exist.
+	dir := filepath.Dir(config.Output)
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		os.MkdirAll(dir, os.ModePerm)
 	}
 
 	return config
@@ -85,48 +71,34 @@ type IndexerWriteListener struct {
 }
 
 func NewIndexerWriteListener(config IndexerConfig, parentIndexerListener *IndexerWriteListener, ctx *sdktypes.Context, contractAddress sdktypes.AccAddress, codeID uint64) *IndexerWriteListener {
-	// Find filter match.
-	var filter IndexerConfigFilter
-	found := false
-	for _, f := range config.Filters {
-		// If there are no filters, we match.
-		if len(f.CodeIds) == 0 && len(f.ContractAddresses) == 0 {
-			filter = f
-			found = true
-			break
-		}
+	// If there are any filters set, check them.
+	if len(config.Filter.CodeIds) != 0 || len(config.Filter.ContractAddresses) != 0 {
+		found := false
 
-		// If filters exist, check them.
-		for _, c := range f.CodeIds {
+		for _, c := range config.Filter.CodeIds {
 			if c == codeID {
-				filter = f
 				found = true
 				break
 			}
 		}
-		for _, c := range f.ContractAddresses {
+
+		for _, c := range config.Filter.ContractAddresses {
 			if c == contractAddress.String() {
-				filter = f
 				found = true
 				break
 			}
 		}
 
-		// If found filter, stop.
-		if found {
-			break
+		// If filter is set and we didn't find a match, don't create a listener.
+		if !found {
+			return nil
 		}
-	}
-
-	// If no filter match, don't create listener.
-	if !found {
-		return nil
 	}
 
 	return &IndexerWriteListener{
 		parentIndexerListener: parentIndexerListener,
 		logger:                ctx.Logger(),
-		output:                filter.Output,
+		output:                config.Output,
 
 		queue:     make(map[string]PendingIndexerEvent),
 		committed: false,
