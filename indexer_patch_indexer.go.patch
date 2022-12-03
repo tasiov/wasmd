@@ -1,6 +1,6 @@
 diff --git a/x/wasm/keeper/indexer.go b/x/wasm/keeper/indexer.go
 new file mode 100644
-index 0000000..6f1b8da
+index 0000000..8be3640
 --- /dev/null
 +++ b/x/wasm/keeper/indexer.go
 @@ -0,0 +1,173 @@
@@ -39,7 +39,7 @@ index 0000000..6f1b8da
 +	jsonParser.Decode(&config)
 +
 +	// Resolve output path.
-+	config.Output = filepath.Join(wasmdDir, "indexer", ".events.json")
++	config.Output = filepath.Join(wasmdDir, "indexer", ".events.txt")
 +	// Create folder if doesn't exist.
 +	dir := filepath.Dir(config.Output)
 +	if _, err := os.Stat(dir); os.IsNotExist(err) {

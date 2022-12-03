@@ -33,7 +33,7 @@ func LoadIndexerConfig(wasmdDir string) IndexerConfig {
 	jsonParser.Decode(&config)
 
 	// Resolve output path.
-	config.Output = filepath.Join(wasmdDir, "indexer", ".events.json")
+	config.Output = filepath.Join(wasmdDir, "indexer", ".events.txt")
 	// Create folder if doesn't exist.
 	dir := filepath.Dir(config.Output)
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
