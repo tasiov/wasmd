@@ -75,17 +75,22 @@ func NewIndexerWriteListener(config IndexerConfig, parentIndexerListener *Indexe
 	if len(config.Filter.CodeIds) != 0 || len(config.Filter.ContractAddresses) != 0 {
 		found := false
 
-		for _, c := range config.Filter.CodeIds {
-			if c == codeID {
-				found = true
-				break
+		if len(config.Filter.CodeIds) != 0 {
+			for _, c := range config.Filter.CodeIds {
+				if c == codeID {
+					found = true
+					break
+				}
 			}
 		}
 
-		for _, c := range config.Filter.ContractAddresses {
-			if c == contractAddress.String() {
-				found = true
-				break
+		// Only check contract addresses if we have not yet found a match.
+		if !found && len(config.Filter.ContractAddresses) != 0 {
+			for _, c := range config.Filter.ContractAddresses {
+				if c == contractAddress.String() {
+					found = true
+					break
+				}
 			}
 		}
 
