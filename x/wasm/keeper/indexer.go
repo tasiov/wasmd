@@ -1,6 +1,7 @@
 package keeper
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -61,8 +62,8 @@ type PendingIndexerEvent struct {
 	BlockTimeUnixMs int64  `json:"blockTimeUnixMs"`
 	ContractAddress string `json:"contractAddress"`
 	CodeId          uint64 `json:"codeId"`
-	Key             []byte `json:"key"`
-	Value           []byte `json:"value"`
+	Key             string `json:"key"`
+	Value           string `json:"value"`
 	Delete          bool   `json:"delete"`
 }
 
@@ -73,7 +74,7 @@ type IndexerWriteListener struct {
 	logger                log.Logger
 	output                string
 
-	queue     []PendingIndexerEvent
+	queue     map[string]PendingIndexerEvent
 	committed bool
 
 	// Contract info.
@@ -127,7 +128,7 @@ func NewIndexerWriteListener(config IndexerConfig, parentIndexerListener *Indexe
 		logger:                ctx.Logger(),
 		output:                filter.Output,
 
-		queue:     make([]PendingIndexerEvent, 0),
+		queue:     make(map[string]PendingIndexerEvent),
 		committed: false,
 
 		// Contract info.
@@ -140,15 +141,18 @@ func NewIndexerWriteListener(config IndexerConfig, parentIndexerListener *Indexe
 
 // Add write events to queue.
 func (wl *IndexerWriteListener) OnWrite(storeKey sdkstoretypes.StoreKey, key []byte, value []byte, delete bool) error {
-	wl.queue = append(wl.queue, PendingIndexerEvent{
+	keyBase64 := base64.StdEncoding.EncodeToString(key)
+	valueBase64 := base64.StdEncoding.EncodeToString(value)
+
+	wl.queue[keyBase64] = PendingIndexerEvent{
 		BlockHeight:     wl.blockHeight,
 		BlockTimeUnixMs: wl.blockTimeUnixMs,
 		ContractAddress: wl.contractAddress,
 		CodeId:          wl.codeID,
-		Key:             key,
-		Value:           value,
+		Key:             keyBase64,
+		Value:           valueBase64,
 		Delete:          delete,
-	})
+	}
 
 	return nil
 }
@@ -157,7 +161,9 @@ func (wl *IndexerWriteListener) OnWrite(storeKey sdkstoretypes.StoreKey, key []b
 func (wl *IndexerWriteListener) commit() {
 	// Add all events to parent listener queue if exists.
 	if wl.parentIndexerListener != nil {
-		wl.parentIndexerListener.queue = append(wl.parentIndexerListener.queue, wl.queue...)
+		for k, v := range wl.queue {
+			wl.parentIndexerListener.queue[k] = v
+		}
 	}
 	wl.committed = true
 }
