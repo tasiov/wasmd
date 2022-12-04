@@ -44,17 +44,15 @@ func LoadIndexerConfig(wasmdDir string) IndexerConfig {
 }
 
 type PendingIndexerEvent struct {
-	BlockHeight     int64  `json:"blockHeight"`
-	BlockTimeUnixMs int64  `json:"blockTimeUnixMs"`
-	ContractAddress string `json:"contractAddress"`
-	CodeId          uint64 `json:"codeId"`
-	Key             string `json:"key"`
-	Value           string `json:"value"`
-	Delete          bool   `json:"delete"`
+	BlockHeight        int64  `json:"blockHeight"`
+	BlockTimeUnixMicro int64  `json:"blockTimeUnixMicro"`
+	ContractAddress    string `json:"contractAddress"`
+	CodeId             uint64 `json:"codeId"`
+	Key                string `json:"key"`
+	Value              string `json:"value"`
+	Delete             bool   `json:"delete"`
 }
 
-// IndexerWriteListener is used to configure listening to a KVStore by writing
-// out to a PostgreSQL DB.
 type IndexerWriteListener struct {
 	parentIndexerListener *IndexerWriteListener
 	logger                log.Logger
@@ -64,10 +62,10 @@ type IndexerWriteListener struct {
 	committed bool
 
 	// Contract info.
-	contractAddress string
-	codeID          uint64
-	blockHeight     int64
-	blockTimeUnixMs int64
+	contractAddress    string
+	codeID             uint64
+	blockHeight        int64
+	blockTimeUnixMicro int64
 }
 
 func NewIndexerWriteListener(config IndexerConfig, parentIndexerListener *IndexerWriteListener, ctx *sdktypes.Context, contractAddress sdktypes.AccAddress, codeID uint64) *IndexerWriteListener {
@@ -109,10 +107,10 @@ func NewIndexerWriteListener(config IndexerConfig, parentIndexerListener *Indexe
 		committed: false,
 
 		// Contract info.
-		contractAddress: contractAddress.String(),
-		codeID:          codeID,
-		blockHeight:     ctx.BlockHeight(),
-		blockTimeUnixMs: ctx.BlockTime().UnixMicro(),
+		contractAddress:    contractAddress.String(),
+		codeID:             codeID,
+		blockHeight:        ctx.BlockHeight(),
+		blockTimeUnixMicro: ctx.BlockTime().UnixMicro(),
 	}
 }
 
@@ -121,14 +119,20 @@ func (wl *IndexerWriteListener) OnWrite(storeKey sdkstoretypes.StoreKey, key []b
 	keyBase64 := base64.StdEncoding.EncodeToString(key)
 	valueBase64 := base64.StdEncoding.EncodeToString(value)
 
-	wl.queue[keyBase64] = PendingIndexerEvent{
-		BlockHeight:     wl.blockHeight,
-		BlockTimeUnixMs: wl.blockTimeUnixMs,
-		ContractAddress: wl.contractAddress,
-		CodeId:          wl.codeID,
-		Key:             keyBase64,
-		Value:           valueBase64,
-		Delete:          delete,
+	// Values are unique to the pair of contract address and key. The last value
+	// write (set or delete) in a block wins. This listener/queue only exists in
+	// the context of a single block, so we don't need to include block height in
+	// this unique key.
+	queueKey := wl.contractAddress + keyBase64
+
+	wl.queue[queueKey] = PendingIndexerEvent{
+		BlockHeight:        wl.blockHeight,
+		BlockTimeUnixMicro: wl.blockTimeUnixMicro,
+		ContractAddress:    wl.contractAddress,
+		CodeId:             wl.codeID,
+		Key:                keyBase64,
+		Value:              valueBase64,
+		Delete:             delete,
 	}
 
 	return nil
