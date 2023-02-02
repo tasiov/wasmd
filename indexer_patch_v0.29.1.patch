@@ -1,6 +1,6 @@
 diff --git a/x/wasm/keeper/indexer.go b/x/wasm/keeper/indexer.go
 new file mode 100644
-index 0000000..f1b65bd
+index 00000000..f1b65bd6
 --- /dev/null
 +++ b/x/wasm/keeper/indexer.go
 @@ -0,0 +1,182 @@
@@ -187,7 +187,7 @@ index 0000000..f1b65bd
 +	wl.logger.Info("[INDEXER] Exported events", "blockHeight", wl.blockHeight, "codeId", wl.codeID, "contractAddress", wl.contractAddress, "count", len(wl.queue), "output", wl.output)
 +}
 diff --git a/x/wasm/keeper/keeper.go b/x/wasm/keeper/keeper.go
-index f29f6e1..d70bd19 100644
+index f29f6e18..ba59fcad 100644
 --- a/x/wasm/keeper/keeper.go
 +++ b/x/wasm/keeper/keeper.go
 @@ -16,6 +16,7 @@ import (
@@ -343,7 +343,7 @@ index f29f6e1..d70bd19 100644
  	prefixStore := prefix.NewStore(ctx.KVStore(k.storeKey), prefixStoreKey)
 +
 +	// INDEXER: Listen to KV Store changes.
-+	indexerStore, listener := k.attachIndexer(&prefixStore, &ctx, contractAddress, contractInfo.CodeID)
++	indexerStore, listener := k.attachIndexer(&prefixStore, &ctx, contractAddress, newCodeID)
 +	if listener != nil {
 +		defer listener.finish()
 +	}
