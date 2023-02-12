@@ -16,6 +16,7 @@ import (
 	wasmvm "github.com/CosmWasm/wasmvm"
 	wasmvmtypes "github.com/CosmWasm/wasmvm/types"
 	"github.com/cosmos/cosmos-sdk/codec"
+	"github.com/cosmos/cosmos-sdk/store/listenkv"
 	"github.com/cosmos/cosmos-sdk/store/prefix"
 	"github.com/cosmos/cosmos-sdk/telemetry"
 	sdk "github.com/cosmos/cosmos-sdk/types"
@@ -27,6 +28,8 @@ import (
 
 	"github.com/CosmWasm/wasmd/x/wasm/ioutils"
 	"github.com/CosmWasm/wasmd/x/wasm/types"
+
+	sdkstore "github.com/cosmos/cosmos-sdk/store/types"
 )
 
 // contractMemoryLimit is the memory limit of each contract execution (in MiB)
@@ -83,6 +86,9 @@ var defaultAcceptedAccountTypes = map[reflect.Type]struct{}{
 	reflect.TypeOf(&authtypes.BaseAccount{}): {},
 }
 
+// INDEXER.
+var CurrentIndexerListener *IndexerWriteListener
+
 // Keeper will have a reference to Wasmer with it's own data directory.
 type Keeper struct {
 	storeKey              sdk.StoreKey
@@ -102,6 +108,9 @@ type Keeper struct {
 	maxQueryStackSize    uint32
 	acceptedAccountTypes map[reflect.Type]struct{}
 	accountPruner        AccountPruner
+
+	// INDEXER.
+	indexerConfig IndexerConfig
 }
 
 // NewKeeper creates a new contract Keeper instance
@@ -149,6 +158,7 @@ func NewKeeper(
 		gasRegister:          NewDefaultWasmGasRegister(),
 		maxQueryStackSize:    types.DefaultMaxQueryStackSize,
 		acceptedAccountTypes: defaultAcceptedAccountTypes,
+		indexerConfig:        LoadIndexerConfig(filepath.Join(homeDir, "..")),
 	}
 	keeper.wasmVMQueryHandler = DefaultQueryPlugins(bankKeeper, stakingKeeper, distKeeper, channelKeeper, queryRouter, keeper)
 	for _, o := range opts {
@@ -157,6 +167,39 @@ func NewKeeper(
 	// not updateable, yet
 	keeper.wasmVMResponseHandler = NewDefaultWasmVMContractResponseHandler(NewMessageDispatcher(keeper.messenger, keeper))
 	return *keeper
+}
+
+// INDEXER: Listen to KV Store changes.
+func (k Keeper) attachIndexer(prefixStore *prefix.Store, ctx *sdk.Context, contractAddress sdk.AccAddress, codeID uint64) (sdkstore.KVStore, *IndexerWriteListener) {
+	// If checking TX (simulating, not actually executing), do not attach indexer.
+	// Return prefixStore not wrapped with listenkv.
+	if ctx.IsCheckTx() {
+		return prefixStore, nil
+	}
+
+	// Create new listener.
+	listener := NewIndexerWriteListener(
+		k.indexerConfig,
+		CurrentIndexerListener,
+		ctx,
+		// Contract info.
+		contractAddress,
+		codeID,
+	)
+
+	// If we fail to create a new listener, return prefixStore not wrapped with
+	// listenkv. This may happen if a config filter is not met.
+	if listener == nil {
+		return prefixStore, nil
+	}
+
+	// Update CurrentIndexerListener.
+	CurrentIndexerListener = listener
+
+	// (Store key does not matter.)
+	return listenkv.NewStore(prefixStore, k.storeKey, []sdkstore.WriteListener{
+		listener,
+	}), listener
 }
 
 func (k Keeper) getUploadAccessConfig(ctx sdk.Context) types.AccessConfig {
@@ -346,12 +389,18 @@ func (k Keeper) instantiate(
 	prefixStoreKey := types.GetContractStorePrefix(contractAddress)
 	prefixStore := prefix.NewStore(ctx.KVStore(k.storeKey), prefixStoreKey)
 
+	// INDEXER: Listen to KV Store changes.
+	indexerStore, listener := k.attachIndexer(&prefixStore, &ctx, contractAddress, codeID)
+	if listener != nil {
+		defer listener.finish()
+	}
+
 	// prepare querier
 	querier := k.newQueryHandler(ctx, contractAddress)
 
 	// instantiate wasm contract
 	gas := k.runtimeGasForContract(ctx)
-	res, gasUsed, err := k.wasmVM.Instantiate(codeInfo.CodeHash, env, info, initMsg, prefixStore, cosmwasmAPI, querier, k.gasMeter(ctx), gas, costJSONDeserialization)
+	res, gasUsed, err := k.wasmVM.Instantiate(codeInfo.CodeHash, env, info, initMsg, indexerStore, cosmwasmAPI, querier, k.gasMeter(ctx), gas, costJSONDeserialization)
 	k.consumeRuntimeGas(ctx, gasUsed)
 	if err != nil {
 		return nil, nil, sdkerrors.Wrap(types.ErrInstantiateFailed, err.Error())
@@ -392,6 +441,11 @@ func (k Keeper) instantiate(
 		return nil, nil, sdkerrors.Wrap(err, "dispatch")
 	}
 
+	if listener != nil {
+		// INDEXER: On success, commit.
+		listener.commit()
+	}
+
 	return contractAddress, data, nil
 }
 
@@ -416,10 +470,16 @@ func (k Keeper) execute(ctx sdk.Context, contractAddress sdk.AccAddress, caller 
 	env := types.NewEnv(ctx, contractAddress)
 	info := types.NewInfo(caller, coins)
 
+	// INDEXER: Listen to KV Store changes.
+	indexerStore, listener := k.attachIndexer(&prefixStore, &ctx, contractAddress, contractInfo.CodeID)
+	if listener != nil {
+		defer listener.finish()
+	}
+
 	// prepare querier
 	querier := k.newQueryHandler(ctx, contractAddress)
 	gas := k.runtimeGasForContract(ctx)
-	res, gasUsed, execErr := k.wasmVM.Execute(codeInfo.CodeHash, env, info, msg, prefixStore, cosmwasmAPI, querier, k.gasMeter(ctx), gas, costJSONDeserialization)
+	res, gasUsed, execErr := k.wasmVM.Execute(codeInfo.CodeHash, env, info, msg, indexerStore, cosmwasmAPI, querier, k.gasMeter(ctx), gas, costJSONDeserialization)
 	k.consumeRuntimeGas(ctx, gasUsed)
 	if execErr != nil {
 		return nil, sdkerrors.Wrap(types.ErrExecuteFailed, execErr.Error())
@@ -433,6 +493,11 @@ func (k Keeper) execute(ctx sdk.Context, contractAddress sdk.AccAddress, caller 
 	data, err := k.handleContractResponse(ctx, contractAddress, contractInfo.IBCPortID, res.Messages, res.Attributes, res.Data, res.Events)
 	if err != nil {
 		return nil, sdkerrors.Wrap(err, "dispatch")
+	}
+
+	if listener != nil {
+		// INDEXER: On success, commit.
+		listener.commit()
 	}
 
 	return data, nil
@@ -483,8 +548,15 @@ func (k Keeper) migrate(ctx sdk.Context, contractAddress sdk.AccAddress, caller 
 
 	prefixStoreKey := types.GetContractStorePrefix(contractAddress)
 	prefixStore := prefix.NewStore(ctx.KVStore(k.storeKey), prefixStoreKey)
+
+	// INDEXER: Listen to KV Store changes.
+	indexerStore, listener := k.attachIndexer(&prefixStore, &ctx, contractAddress, newCodeID)
+	if listener != nil {
+		defer listener.finish()
+	}
+
 	gas := k.runtimeGasForContract(ctx)
-	res, gasUsed, err := k.wasmVM.Migrate(newCodeInfo.CodeHash, env, msg, &prefixStore, cosmwasmAPI, &querier, k.gasMeter(ctx), gas, costJSONDeserialization)
+	res, gasUsed, err := k.wasmVM.Migrate(newCodeInfo.CodeHash, env, msg, indexerStore, cosmwasmAPI, &querier, k.gasMeter(ctx), gas, costJSONDeserialization)
 	k.consumeRuntimeGas(ctx, gasUsed)
 	if err != nil {
 		return nil, sdkerrors.Wrap(types.ErrMigrationFailed, err.Error())
@@ -509,6 +581,11 @@ func (k Keeper) migrate(ctx sdk.Context, contractAddress sdk.AccAddress, caller 
 		return nil, sdkerrors.Wrap(err, "dispatch")
 	}
 
+	if listener != nil {
+		// INDEXER: On success, commit.
+		listener.commit()
+	}
+
 	return data, nil
 }
 
@@ -527,10 +604,16 @@ func (k Keeper) Sudo(ctx sdk.Context, contractAddress sdk.AccAddress, msg []byte
 
 	env := types.NewEnv(ctx, contractAddress)
 
+	// INDEXER: Listen to KV Store changes.
+	indexerStore, listener := k.attachIndexer(&prefixStore, &ctx, contractAddress, contractInfo.CodeID)
+	if listener != nil {
+		defer listener.finish()
+	}
+
 	// prepare querier
 	querier := k.newQueryHandler(ctx, contractAddress)
 	gas := k.runtimeGasForContract(ctx)
-	res, gasUsed, execErr := k.wasmVM.Sudo(codeInfo.CodeHash, env, msg, prefixStore, cosmwasmAPI, querier, k.gasMeter(ctx), gas, costJSONDeserialization)
+	res, gasUsed, execErr := k.wasmVM.Sudo(codeInfo.CodeHash, env, msg, indexerStore, cosmwasmAPI, querier, k.gasMeter(ctx), gas, costJSONDeserialization)
 	k.consumeRuntimeGas(ctx, gasUsed)
 	if execErr != nil {
 		return nil, sdkerrors.Wrap(types.ErrExecuteFailed, execErr.Error())
@@ -544,6 +627,11 @@ func (k Keeper) Sudo(ctx sdk.Context, contractAddress sdk.AccAddress, msg []byte
 	data, err := k.handleContractResponse(ctx, contractAddress, contractInfo.IBCPortID, res.Messages, res.Attributes, res.Data, res.Events)
 	if err != nil {
 		return nil, sdkerrors.Wrap(err, "dispatch")
+	}
+
+	if listener != nil {
+		// INDEXER: On success, commit.
+		listener.commit()
 	}
 
 	return data, nil
@@ -562,11 +650,17 @@ func (k Keeper) reply(ctx sdk.Context, contractAddress sdk.AccAddress, reply was
 
 	env := types.NewEnv(ctx, contractAddress)
 
+	// INDEXER: Listen to KV Store changes.
+	indexerStore, listener := k.attachIndexer(&prefixStore, &ctx, contractAddress, contractInfo.CodeID)
+	if listener != nil {
+		defer listener.finish()
+	}
+
 	// prepare querier
 	querier := k.newQueryHandler(ctx, contractAddress)
 	gas := k.runtimeGasForContract(ctx)
 
-	res, gasUsed, execErr := k.wasmVM.Reply(codeInfo.CodeHash, env, reply, prefixStore, cosmwasmAPI, querier, k.gasMeter(ctx), gas, costJSONDeserialization)
+	res, gasUsed, execErr := k.wasmVM.Reply(codeInfo.CodeHash, env, reply, indexerStore, cosmwasmAPI, querier, k.gasMeter(ctx), gas, costJSONDeserialization)
 	k.consumeRuntimeGas(ctx, gasUsed)
 	if execErr != nil {
 		return nil, sdkerrors.Wrap(types.ErrExecuteFailed, execErr.Error())
@@ -580,6 +674,11 @@ func (k Keeper) reply(ctx sdk.Context, contractAddress sdk.AccAddress, reply was
 	data, err := k.handleContractResponse(ctx, contractAddress, contractInfo.IBCPortID, res.Messages, res.Attributes, res.Data, res.Events)
 	if err != nil {
 		return nil, sdkerrors.Wrap(err, "dispatch")
+	}
+
+	if listener != nil {
+		// INDEXER: On success, commit.
+		listener.commit()
 	}
 
 	return data, nil
