@@ -1,6 +1,12 @@
-module github.com/CosmWasm/wasmd
+module github.com/NoahSaso/wasmd
 
 go 1.18
+
+// Require original version and then replace it, so we don't have to update
+// every single import in the codebase with the new module name.
+require github.com/CosmWasm/wasmd v0.29.2
+
+replace github.com/CosmWasm/wasmd => ./
 
 require (
 	github.com/CosmWasm/wasmvm v1.1.1
