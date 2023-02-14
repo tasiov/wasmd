@@ -58,7 +58,7 @@ index a0f710b3..f7a1dd8f 100644
  github.com/tecbot/gorocksdb v0.0.0-20191217155057-f0fad39f321c h1:g+WoO5jjkqGAzHWCjJB1zZfXPIAaDpzXIEJ0eS6B5Ok=
 diff --git a/x/wasm/keeper/indexer.go b/x/wasm/keeper/indexer.go
 new file mode 100644
-index 00000000..f1b65bd6
+index 00000000..6ceb53c2
 --- /dev/null
 +++ b/x/wasm/keeper/indexer.go
 @@ -0,0 +1,182 @@
@@ -89,12 +89,12 @@ index 00000000..f1b65bd6
 +func LoadIndexerConfig(wasmdDir string) IndexerConfig {
 +	var config IndexerConfig
 +	configFile, err := os.Open(filepath.Join(wasmdDir, "indexer", "config.json"))
-+	if err != nil {
-+		panic(err.Error())
++	// Read config from file if it exists. Otherwise, use default config.
++	if err == nil {
++		defer configFile.Close()
++		jsonParser := json.NewDecoder(configFile)
++		jsonParser.Decode(&config)
 +	}
-+	defer configFile.Close()
-+	jsonParser := json.NewDecoder(configFile)
-+	jsonParser.Decode(&config)
 +
 +	// Resolve output path.
 +	config.Output = filepath.Join(wasmdDir, "indexer", ".events.txt")
