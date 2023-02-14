@@ -1,12 +1,6 @@
-module github.com/NoahSaso/wasmd
+module github.com/CosmWasm/wasmd
 
 go 1.18
-
-// Require original version and then replace it, so we don't have to update
-// every single import in the codebase with the new module name.
-require github.com/CosmWasm/wasmd v0.29.2
-
-replace github.com/CosmWasm/wasmd => ./
 
 require (
 	github.com/CosmWasm/wasmvm v1.1.1
@@ -143,3 +137,5 @@ replace (
 	github.com/gogo/protobuf => github.com/regen-network/protobuf v1.3.3-alpha.regen.1
 	google.golang.org/grpc => google.golang.org/grpc v1.33.2
 )
+
+replace github.com/cosmos/cosmos-sdk => github.com/NoahSaso/cosmos-sdk v0.45.9-indexer
