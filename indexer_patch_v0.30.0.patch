@@ -1,6 +1,39 @@
+diff --git a/go.mod b/go.mod
+index 9140e8e4..66c68384 100644
+--- a/go.mod
++++ b/go.mod
+@@ -139,3 +139,6 @@ replace (
+ 	github.com/gogo/protobuf => github.com/regen-network/protobuf v1.3.3-alpha.regen.1
+ 	google.golang.org/grpc => google.golang.org/grpc v1.33.2
+ )
++
++// INDEXER
++replace github.com/cosmos/cosmos-sdk => github.com/NoahSaso/cosmos-sdk v0.45.11-indexer
+diff --git a/go.sum b/go.sum
+index c7b2fad9..3131819c 100644
+--- a/go.sum
++++ b/go.sum
+@@ -66,6 +66,8 @@ github.com/DataDog/zstd v1.4.1/go.mod h1:1jcaCB/ufaK+sKp1NBhlGmpz41jOoPQ35bpF36t
+ github.com/DataDog/zstd v1.4.5/go.mod h1:1jcaCB/ufaK+sKp1NBhlGmpz41jOoPQ35bpF36t7BBo=
+ github.com/Knetic/govaluate v3.0.1-0.20171022003610-9aa49832a739+incompatible/go.mod h1:r7JcOSlj0wfOMncg0iLm8Leh48TZaKVeNIfJntJ2wa0=
+ github.com/Microsoft/go-winio v0.6.0 h1:slsWYD/zyx7lCXoZVlvQrj0hPTM1HI4+v1sIda2yDvg=
++github.com/NoahSaso/cosmos-sdk v0.45.11-indexer h1:FHK+sk0HBE0YFHS4SZq/88VIszaSFNU7nbmtXY8Cq4M=
++github.com/NoahSaso/cosmos-sdk v0.45.11-indexer/go.mod h1:45z8Q1Ah4iypFycu2Kl4kBPIsQKUiND8G2CUX+HTtPM=
+ github.com/Nvveen/Gotty v0.0.0-20120604004816-cd527374f1e5 h1:TngWCqHvy9oXAN6lEVMRuU21PR1EtLVZJmdB18Gu3Rw=
+ github.com/OneOfOne/xxhash v1.2.2 h1:KMrpdQIwFcEqXDklaen+P1axHaj9BSKzvpUUfnHldSE=
+ github.com/OneOfOne/xxhash v1.2.2/go.mod h1:HSdplMjZKSmBqAxg5vPj2TmRDmfkzw+cTzAElWljhcU=
+@@ -162,8 +164,6 @@ github.com/cosmos/btcutil v1.0.4 h1:n7C2ngKXo7UC9gNyMNLbzqz7Asuf+7Qv4gnX/rOdQ44=
+ github.com/cosmos/btcutil v1.0.4/go.mod h1:Ffqc8Hn6TJUdDgHBwIZLtrLQC1KdJ9jGJl/TvgUaxbU=
+ github.com/cosmos/cosmos-proto v1.0.0-alpha8 h1:d3pCRuMYYvGA5bM0ZbbjKn+AoQD4A7dyNG2wzwWalUw=
+ github.com/cosmos/cosmos-proto v1.0.0-alpha8/go.mod h1:6/p+Bc4O8JKeZqe0VqUGTX31eoYqemTT4C1hLCWsO7I=
+-github.com/cosmos/cosmos-sdk v0.45.11 h1:Pc44fFEkai0KXFND5Ys/2ZJkfVdstMIBzKBN8MY7Ll0=
+-github.com/cosmos/cosmos-sdk v0.45.11/go.mod h1:45z8Q1Ah4iypFycu2Kl4kBPIsQKUiND8G2CUX+HTtPM=
+ github.com/cosmos/cosmos-sdk/ics23/go v0.8.0 h1:iKclrn3YEOwk4jQHT2ulgzuXyxmzmPczUalMwW4XH9k=
+ github.com/cosmos/cosmos-sdk/ics23/go v0.8.0/go.mod h1:2a4dBq88TUoqoWAU5eu0lGvpFP3wWDPgdHPargtyw30=
+ github.com/cosmos/go-bip39 v0.0.0-20180819234021-555e2067c45d/go.mod h1:tSxLoYXyBmiFeKpvmq4dzayMdCjCnu8uqmCysIGBT2Y=
 diff --git a/x/wasm/keeper/indexer.go b/x/wasm/keeper/indexer.go
 new file mode 100644
-index 00000000..f1b65bd6
+index 00000000..6ceb53c2
 --- /dev/null
 +++ b/x/wasm/keeper/indexer.go
 @@ -0,0 +1,182 @@
@@ -31,12 +64,12 @@ index 00000000..f1b65bd6
 +func LoadIndexerConfig(wasmdDir string) IndexerConfig {
 +	var config IndexerConfig
 +	configFile, err := os.Open(filepath.Join(wasmdDir, "indexer", "config.json"))
-+	if err != nil {
-+		panic(err.Error())
++	// Read config from file if it exists. Otherwise, use default config.
++	if err == nil {
++		defer configFile.Close()
++		jsonParser := json.NewDecoder(configFile)
++		jsonParser.Decode(&config)
 +	}
-+	defer configFile.Close()
-+	jsonParser := json.NewDecoder(configFile)
-+	jsonParser.Decode(&config)
 +
 +	// Resolve output path.
 +	config.Output = filepath.Join(wasmdDir, "indexer", ".events.txt")
