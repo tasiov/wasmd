@@ -134,3 +134,6 @@ replace (
 	google.golang.org/grpc => google.golang.org/grpc v1.33.2
 
 )
+
+// INDEXER
+replace github.com/cosmos/cosmos-sdk => github.com/NoahSaso/cosmos-sdk v0.45.5-indexer

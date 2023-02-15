@@ -485,7 +485,7 @@ func (k Keeper) migrate(ctx sdk.Context, contractAddress sdk.AccAddress, caller 
 	prefixStore := prefix.NewStore(ctx.KVStore(k.storeKey), prefixStoreKey)
 
 	// INDEXER: Listen to KV Store changes.
-	indexerStore, listener := k.attachIndexer(&prefixStore, &ctx, contractAddress, contractInfo.CodeID)
+	indexerStore, listener := k.attachIndexer(&prefixStore, &ctx, contractAddress, newCodeID)
 	if listener != nil {
 		defer listener.finish()
 	}
