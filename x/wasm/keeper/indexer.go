@@ -25,12 +25,12 @@ type IndexerConfig struct {
 func LoadIndexerConfig(wasmdDir string) IndexerConfig {
 	var config IndexerConfig
 	configFile, err := os.Open(filepath.Join(wasmdDir, "indexer", "config.json"))
-	if err != nil {
-		panic(err.Error())
+	// Read config from file if it exists. Otherwise, use default config.
+	if err == nil {
+		defer configFile.Close()
+		jsonParser := json.NewDecoder(configFile)
+		jsonParser.Decode(&config)
 	}
-	defer configFile.Close()
-	jsonParser := json.NewDecoder(configFile)
-	jsonParser.Decode(&config)
 
 	// Resolve output path.
 	config.Output = filepath.Join(wasmdDir, "indexer", ".events.txt")
