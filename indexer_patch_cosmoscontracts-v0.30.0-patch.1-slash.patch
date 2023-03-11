@@ -1,5 +1,5 @@
 diff --git a/go.mod b/go.mod
-index 9140e8e4..66c68384 100644
+index 9140e8e..66c6838 100644
 --- a/go.mod
 +++ b/go.mod
 @@ -139,3 +139,6 @@ replace (
@@ -10,7 +10,7 @@ index 9140e8e4..66c68384 100644
 +// INDEXER
 +replace github.com/cosmos/cosmos-sdk => github.com/NoahSaso/cosmos-sdk v0.45.11-indexer
 diff --git a/go.sum b/go.sum
-index c7b2fad9..3131819c 100644
+index c7b2fad..3131819 100644
 --- a/go.sum
 +++ b/go.sum
 @@ -66,6 +66,8 @@ github.com/DataDog/zstd v1.4.1/go.mod h1:1jcaCB/ufaK+sKp1NBhlGmpz41jOoPQ35bpF36t
@@ -33,7 +33,7 @@ index c7b2fad9..3131819c 100644
  github.com/cosmos/go-bip39 v0.0.0-20180819234021-555e2067c45d/go.mod h1:tSxLoYXyBmiFeKpvmq4dzayMdCjCnu8uqmCysIGBT2Y=
 diff --git a/x/wasm/keeper/indexer.go b/x/wasm/keeper/indexer.go
 new file mode 100644
-index 00000000..6ceb53c2
+index 0000000..fa66d93
 --- /dev/null
 +++ b/x/wasm/keeper/indexer.go
 @@ -0,0 +1,182 @@
@@ -72,7 +72,7 @@ index 00000000..6ceb53c2
 +	}
 +
 +	// Resolve output path.
-+	config.Output = filepath.Join(wasmdDir, "indexer", ".events.txt")
++	config.Output = filepath.Join(wasmdDir, "indexer", "wasm.out")
 +	// Create folder if doesn't exist.
 +	dir := filepath.Dir(config.Output)
 +	if _, err := os.Stat(dir); os.IsNotExist(err) {
@@ -83,13 +83,13 @@ index 00000000..6ceb53c2
 +}
 +
 +type PendingIndexerEvent struct {
-+	BlockHeight        int64  `json:"blockHeight"`
-+	BlockTimeUnixMicro int64  `json:"blockTimeUnixMicro"`
-+	ContractAddress    string `json:"contractAddress"`
-+	CodeId             uint64 `json:"codeId"`
-+	Key                string `json:"key"`
-+	Value              string `json:"value"`
-+	Delete             bool   `json:"delete"`
++	BlockHeight     int64  `json:"blockHeight"`
++	BlockTimeUnixMs int64  `json:"blockTimeUnixMs"`
++	ContractAddress string `json:"contractAddress"`
++	CodeId          uint64 `json:"codeId"`
++	Key             string `json:"key"`
++	Value           string `json:"value"`
++	Delete          bool   `json:"delete"`
 +}
 +
 +type IndexerWriteListener struct {
@@ -101,10 +101,10 @@ index 00000000..6ceb53c2
 +	committed bool
 +
 +	// Contract info.
-+	contractAddress    string
-+	codeID             uint64
-+	blockHeight        int64
-+	blockTimeUnixMicro int64
++	contractAddress string
++	codeID          uint64
++	blockHeight     int64
++	blockTimeUnixMs int64
 +}
 +
 +func NewIndexerWriteListener(config IndexerConfig, parentIndexerListener *IndexerWriteListener, ctx *sdktypes.Context, contractAddress sdktypes.AccAddress, codeID uint64) *IndexerWriteListener {
@@ -146,10 +146,10 @@ index 00000000..6ceb53c2
 +		committed: false,
 +
 +		// Contract info.
-+		contractAddress:    contractAddress.String(),
-+		codeID:             codeID,
-+		blockHeight:        ctx.BlockHeight(),
-+		blockTimeUnixMicro: ctx.BlockTime().UnixMicro(),
++		contractAddress: contractAddress.String(),
++		codeID:          codeID,
++		blockHeight:     ctx.BlockHeight(),
++		blockTimeUnixMs: ctx.BlockTime().UnixMilli(),
 +	}
 +}
 +
@@ -165,13 +165,13 @@ index 00000000..6ceb53c2
 +	queueKey := wl.contractAddress + keyBase64
 +
 +	wl.queue[queueKey] = PendingIndexerEvent{
-+		BlockHeight:        wl.blockHeight,
-+		BlockTimeUnixMicro: wl.blockTimeUnixMicro,
-+		ContractAddress:    wl.contractAddress,
-+		CodeId:             wl.codeID,
-+		Key:                keyBase64,
-+		Value:              valueBase64,
-+		Delete:             delete,
++		BlockHeight:     wl.blockHeight,
++		BlockTimeUnixMs: wl.blockTimeUnixMs,
++		ContractAddress: wl.contractAddress,
++		CodeId:          wl.codeID,
++		Key:             keyBase64,
++		Value:           valueBase64,
++		Delete:          delete,
 +	}
 +
 +	return nil
@@ -220,7 +220,7 @@ index 00000000..6ceb53c2
 +	wl.logger.Info("[INDEXER] Exported events", "blockHeight", wl.blockHeight, "codeId", wl.codeID, "contractAddress", wl.contractAddress, "count", len(wl.queue), "output", wl.output)
 +}
 diff --git a/x/wasm/keeper/keeper.go b/x/wasm/keeper/keeper.go
-index 195a4614..2d363b26 100644
+index 0f6e1d2..a6a1cef 100644
 --- a/x/wasm/keeper/keeper.go
 +++ b/x/wasm/keeper/keeper.go
 @@ -16,6 +16,7 @@ import (
@@ -308,7 +308,7 @@ index 195a4614..2d363b26 100644
  func (k Keeper) getUploadAccessConfig(ctx sdk.Context) types.AccessConfig {
  	var a types.AccessConfig
  	k.paramSpace.Get(ctx, types.ParamStoreKeyUploadAccess, &a)
-@@ -348,12 +391,18 @@ func (k Keeper) instantiate(
+@@ -361,12 +404,18 @@ func (k Keeper) instantiate(
  	prefixStoreKey := types.GetContractStorePrefix(contractAddress)
  	prefixStore := prefix.NewStore(ctx.KVStore(k.storeKey), prefixStoreKey)
  
@@ -328,7 +328,7 @@ index 195a4614..2d363b26 100644
  	k.consumeRuntimeGas(ctx, gasUsed)
  	if err != nil {
  		return nil, nil, sdkerrors.Wrap(types.ErrInstantiateFailed, err.Error())
-@@ -395,6 +444,11 @@ func (k Keeper) instantiate(
+@@ -408,6 +457,11 @@ func (k Keeper) instantiate(
  		return nil, nil, sdkerrors.Wrap(err, "dispatch")
  	}
  
@@ -340,7 +340,7 @@ index 195a4614..2d363b26 100644
  	return contractAddress, data, nil
  }
  
-@@ -419,10 +473,16 @@ func (k Keeper) execute(ctx sdk.Context, contractAddress sdk.AccAddress, caller
+@@ -436,10 +490,16 @@ func (k Keeper) execute(ctx sdk.Context, contractAddress sdk.AccAddress, caller
  	env := types.NewEnv(ctx, contractAddress)
  	info := types.NewInfo(caller, coins)
  
@@ -358,7 +358,7 @@ index 195a4614..2d363b26 100644
  	k.consumeRuntimeGas(ctx, gasUsed)
  	if execErr != nil {
  		return nil, sdkerrors.Wrap(types.ErrExecuteFailed, execErr.Error())
-@@ -438,6 +498,11 @@ func (k Keeper) execute(ctx sdk.Context, contractAddress sdk.AccAddress, caller
+@@ -455,6 +515,11 @@ func (k Keeper) execute(ctx sdk.Context, contractAddress sdk.AccAddress, caller
  		return nil, sdkerrors.Wrap(err, "dispatch")
  	}
  
@@ -370,7 +370,7 @@ index 195a4614..2d363b26 100644
  	return data, nil
  }
  
-@@ -486,8 +551,15 @@ func (k Keeper) migrate(ctx sdk.Context, contractAddress sdk.AccAddress, caller
+@@ -503,8 +568,15 @@ func (k Keeper) migrate(ctx sdk.Context, contractAddress sdk.AccAddress, caller
  
  	prefixStoreKey := types.GetContractStorePrefix(contractAddress)
  	prefixStore := prefix.NewStore(ctx.KVStore(k.storeKey), prefixStoreKey)
@@ -387,7 +387,7 @@ index 195a4614..2d363b26 100644
  	k.consumeRuntimeGas(ctx, gasUsed)
  	if err != nil {
  		return nil, sdkerrors.Wrap(types.ErrMigrationFailed, err.Error())
-@@ -511,6 +583,11 @@ func (k Keeper) migrate(ctx sdk.Context, contractAddress sdk.AccAddress, caller
+@@ -528,6 +600,11 @@ func (k Keeper) migrate(ctx sdk.Context, contractAddress sdk.AccAddress, caller
  		return nil, sdkerrors.Wrap(err, "dispatch")
  	}
  
@@ -399,7 +399,7 @@ index 195a4614..2d363b26 100644
  	return data, nil
  }
  
-@@ -529,10 +606,16 @@ func (k Keeper) Sudo(ctx sdk.Context, contractAddress sdk.AccAddress, msg []byte
+@@ -546,10 +623,16 @@ func (k Keeper) Sudo(ctx sdk.Context, contractAddress sdk.AccAddress, msg []byte
  
  	env := types.NewEnv(ctx, contractAddress)
  
@@ -417,7 +417,7 @@ index 195a4614..2d363b26 100644
  	k.consumeRuntimeGas(ctx, gasUsed)
  	if execErr != nil {
  		return nil, sdkerrors.Wrap(types.ErrExecuteFailed, execErr.Error())
-@@ -548,6 +631,11 @@ func (k Keeper) Sudo(ctx sdk.Context, contractAddress sdk.AccAddress, msg []byte
+@@ -565,6 +648,11 @@ func (k Keeper) Sudo(ctx sdk.Context, contractAddress sdk.AccAddress, msg []byte
  		return nil, sdkerrors.Wrap(err, "dispatch")
  	}
  
@@ -429,7 +429,7 @@ index 195a4614..2d363b26 100644
  	return data, nil
  }
  
-@@ -564,11 +652,17 @@ func (k Keeper) reply(ctx sdk.Context, contractAddress sdk.AccAddress, reply was
+@@ -581,11 +669,17 @@ func (k Keeper) reply(ctx sdk.Context, contractAddress sdk.AccAddress, reply was
  
  	env := types.NewEnv(ctx, contractAddress)
  
@@ -448,7 +448,7 @@ index 195a4614..2d363b26 100644
  	k.consumeRuntimeGas(ctx, gasUsed)
  	if execErr != nil {
  		return nil, sdkerrors.Wrap(types.ErrExecuteFailed, execErr.Error())
-@@ -584,6 +678,11 @@ func (k Keeper) reply(ctx sdk.Context, contractAddress sdk.AccAddress, reply was
+@@ -601,6 +695,11 @@ func (k Keeper) reply(ctx sdk.Context, contractAddress sdk.AccAddress, reply was
  		return nil, sdkerrors.Wrap(err, "dispatch")
  	}
  
