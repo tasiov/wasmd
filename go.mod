@@ -141,4 +141,4 @@ replace (
 )
 
 // INDEXER
-replace github.com/cosmos/cosmos-sdk => github.com/NoahSaso/cosmos-sdk v0.45.11-indexer
+replace github.com/cosmos/cosmos-sdk => github.com/NoahSaso/cosmos-sdk v0.45.11-indexer.3
