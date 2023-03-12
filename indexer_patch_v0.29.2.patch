@@ -31,9 +31,12 @@ index 235a942..f5ed3a7 100644
  github.com/cosmos/cosmos-sdk/ics23/go v0.8.0 h1:iKclrn3YEOwk4jQHT2ulgzuXyxmzmPczUalMwW4XH9k=
  github.com/cosmos/cosmos-sdk/ics23/go v0.8.0/go.mod h1:2a4dBq88TUoqoWAU5eu0lGvpFP3wWDPgdHPargtyw30=
  github.com/cosmos/go-bip39 v0.0.0-20180819234021-555e2067c45d/go.mod h1:tSxLoYXyBmiFeKpvmq4dzayMdCjCnu8uqmCysIGBT2Y=
+diff --git a/indexer_patch_v0.29.2.patch b/indexer_patch_v0.29.2.patch
+new file mode 100644
+index 0000000..e69de29
 diff --git a/x/wasm/keeper/indexer.go b/x/wasm/keeper/indexer.go
 new file mode 100644
-index 0000000..6ceb53c
+index 0000000..fa66d93
 --- /dev/null
 +++ b/x/wasm/keeper/indexer.go
 @@ -0,0 +1,182 @@
@@ -72,7 +75,7 @@ index 0000000..6ceb53c
 +	}
 +
 +	// Resolve output path.
-+	config.Output = filepath.Join(wasmdDir, "indexer", ".events.txt")
++	config.Output = filepath.Join(wasmdDir, "indexer", "wasm.out")
 +	// Create folder if doesn't exist.
 +	dir := filepath.Dir(config.Output)
 +	if _, err := os.Stat(dir); os.IsNotExist(err) {
@@ -83,13 +86,13 @@ index 0000000..6ceb53c
 +}
 +
 +type PendingIndexerEvent struct {
-+	BlockHeight        int64  `json:"blockHeight"`
-+	BlockTimeUnixMicro int64  `json:"blockTimeUnixMicro"`
-+	ContractAddress    string `json:"contractAddress"`
-+	CodeId             uint64 `json:"codeId"`
-+	Key                string `json:"key"`
-+	Value              string `json:"value"`
-+	Delete             bool   `json:"delete"`
++	BlockHeight     int64  `json:"blockHeight"`
++	BlockTimeUnixMs int64  `json:"blockTimeUnixMs"`
++	ContractAddress string `json:"contractAddress"`
++	CodeId          uint64 `json:"codeId"`
++	Key             string `json:"key"`
++	Value           string `json:"value"`
++	Delete          bool   `json:"delete"`
 +}
 +
 +type IndexerWriteListener struct {
@@ -101,10 +104,10 @@ index 0000000..6ceb53c
 +	committed bool
 +
 +	// Contract info.
-+	contractAddress    string
-+	codeID             uint64
-+	blockHeight        int64
-+	blockTimeUnixMicro int64
++	contractAddress string
++	codeID          uint64
++	blockHeight     int64
++	blockTimeUnixMs int64
 +}
 +
 +func NewIndexerWriteListener(config IndexerConfig, parentIndexerListener *IndexerWriteListener, ctx *sdktypes.Context, contractAddress sdktypes.AccAddress, codeID uint64) *IndexerWriteListener {
@@ -146,10 +149,10 @@ index 0000000..6ceb53c
 +		committed: false,
 +
 +		// Contract info.
-+		contractAddress:    contractAddress.String(),
-+		codeID:             codeID,
-+		blockHeight:        ctx.BlockHeight(),
-+		blockTimeUnixMicro: ctx.BlockTime().UnixMicro(),
++		contractAddress: contractAddress.String(),
++		codeID:          codeID,
++		blockHeight:     ctx.BlockHeight(),
++		blockTimeUnixMs: ctx.BlockTime().UnixMilli(),
 +	}
 +}
 +
@@ -165,13 +168,13 @@ index 0000000..6ceb53c
 +	queueKey := wl.contractAddress + keyBase64
 +
 +	wl.queue[queueKey] = PendingIndexerEvent{
-+		BlockHeight:        wl.blockHeight,
-+		BlockTimeUnixMicro: wl.blockTimeUnixMicro,
-+		ContractAddress:    wl.contractAddress,
-+		CodeId:             wl.codeID,
-+		Key:                keyBase64,
-+		Value:              valueBase64,
-+		Delete:             delete,
++		BlockHeight:     wl.blockHeight,
++		BlockTimeUnixMs: wl.blockTimeUnixMs,
++		ContractAddress: wl.contractAddress,
++		CodeId:          wl.codeID,
++		Key:             keyBase64,
++		Value:           valueBase64,
++		Delete:          delete,
 +	}
 +
 +	return nil
