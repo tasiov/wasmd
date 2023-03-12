@@ -33,7 +33,7 @@ func LoadIndexerConfig(wasmdDir string) IndexerConfig {
 	}
 
 	// Resolve output path.
-	config.Output = filepath.Join(wasmdDir, "indexer", ".events.txt")
+	config.Output = filepath.Join(wasmdDir, "indexer", "wasm.out")
 	// Create folder if doesn't exist.
 	dir := filepath.Dir(config.Output)
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
@@ -44,13 +44,13 @@ func LoadIndexerConfig(wasmdDir string) IndexerConfig {
 }
 
 type PendingIndexerEvent struct {
-	BlockHeight        int64  `json:"blockHeight"`
-	BlockTimeUnixMicro int64  `json:"blockTimeUnixMicro"`
-	ContractAddress    string `json:"contractAddress"`
-	CodeId             uint64 `json:"codeId"`
-	Key                string `json:"key"`
-	Value              string `json:"value"`
-	Delete             bool   `json:"delete"`
+	BlockHeight     int64  `json:"blockHeight"`
+	BlockTimeUnixMs int64  `json:"blockTimeUnixMs"`
+	ContractAddress string `json:"contractAddress"`
+	CodeId          uint64 `json:"codeId"`
+	Key             string `json:"key"`
+	Value           string `json:"value"`
+	Delete          bool   `json:"delete"`
 }
 
 type IndexerWriteListener struct {
@@ -62,10 +62,10 @@ type IndexerWriteListener struct {
 	committed bool
 
 	// Contract info.
-	contractAddress    string
-	codeID             uint64
-	blockHeight        int64
-	blockTimeUnixMicro int64
+	contractAddress string
+	codeID          uint64
+	blockHeight     int64
+	blockTimeUnixMs int64
 }
 
 func NewIndexerWriteListener(config IndexerConfig, parentIndexerListener *IndexerWriteListener, ctx *sdktypes.Context, contractAddress sdktypes.AccAddress, codeID uint64) *IndexerWriteListener {
@@ -107,10 +107,10 @@ func NewIndexerWriteListener(config IndexerConfig, parentIndexerListener *Indexe
 		committed: false,
 
 		// Contract info.
-		contractAddress:    contractAddress.String(),
-		codeID:             codeID,
-		blockHeight:        ctx.BlockHeight(),
-		blockTimeUnixMicro: ctx.BlockTime().UnixMicro(),
+		contractAddress: contractAddress.String(),
+		codeID:          codeID,
+		blockHeight:     ctx.BlockHeight(),
+		blockTimeUnixMs: ctx.BlockTime().UnixMilli(),
 	}
 }
 
@@ -126,13 +126,13 @@ func (wl *IndexerWriteListener) OnWrite(storeKey sdkstoretypes.StoreKey, key []b
 	queueKey := wl.contractAddress + keyBase64
 
 	wl.queue[queueKey] = PendingIndexerEvent{
-		BlockHeight:        wl.blockHeight,
-		BlockTimeUnixMicro: wl.blockTimeUnixMicro,
-		ContractAddress:    wl.contractAddress,
-		CodeId:             wl.codeID,
-		Key:                keyBase64,
-		Value:              valueBase64,
-		Delete:             delete,
+		BlockHeight:     wl.blockHeight,
+		BlockTimeUnixMs: wl.blockTimeUnixMs,
+		ContractAddress: wl.contractAddress,
+		CodeId:          wl.codeID,
+		Key:             keyBase64,
+		Value:           valueBase64,
+		Delete:          delete,
 	}
 
 	return nil
