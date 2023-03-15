@@ -379,6 +379,7 @@ func NewWasmApp(
 		app.accountKeeper,
 		app.bankKeeper,
 		app.getSubspace(stakingtypes.ModuleName),
+		homePath,
 	)
 	app.mintKeeper = mintkeeper.NewKeeper(
 		appCodec,
