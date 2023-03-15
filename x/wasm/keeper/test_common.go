@@ -302,6 +302,7 @@ func createTestInput(
 		accountKeeper,
 		bankKeeper,
 		subspace(stakingtypes.ModuleName),
+		"",
 	)
 	stakingKeeper.SetParams(ctx, TestingStakeParams)
 
