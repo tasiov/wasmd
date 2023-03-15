@@ -3,9 +3,11 @@ package keeper
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 
+	wasmvmtypes "github.com/CosmWasm/wasmvm/types"
 	sdkstoretypes "github.com/cosmos/cosmos-sdk/store/types"
 	sdktypes "github.com/cosmos/cosmos-sdk/types"
 	"github.com/tendermint/tendermint/libs/log"
@@ -43,7 +45,10 @@ func LoadIndexerConfig(wasmdDir string) IndexerConfig {
 	return config
 }
 
-type PendingIndexerEvent struct {
+// State
+
+type PendingIndexerStateEvent struct {
+	Type            string `json:"type"`
 	BlockHeight     int64  `json:"blockHeight"`
 	BlockTimeUnixMs int64  `json:"blockTimeUnixMs"`
 	ContractAddress string `json:"contractAddress"`
@@ -53,12 +58,12 @@ type PendingIndexerEvent struct {
 	Delete          bool   `json:"delete"`
 }
 
-type IndexerWriteListener struct {
-	parentIndexerListener *IndexerWriteListener
+type IndexerStateWriteListener struct {
+	parentIndexerListener *IndexerStateWriteListener
 	logger                log.Logger
 	output                string
 
-	queue     map[string]PendingIndexerEvent
+	queue     map[string]PendingIndexerStateEvent
 	committed bool
 
 	// Contract info.
@@ -68,7 +73,7 @@ type IndexerWriteListener struct {
 	blockTimeUnixMs int64
 }
 
-func NewIndexerWriteListener(config IndexerConfig, parentIndexerListener *IndexerWriteListener, ctx *sdktypes.Context, contractAddress sdktypes.AccAddress, codeID uint64) *IndexerWriteListener {
+func NewIndexerStateWriteListener(config IndexerConfig, parentIndexerListener *IndexerStateWriteListener, ctx *sdktypes.Context, contractAddress sdktypes.AccAddress, codeID uint64) *IndexerStateWriteListener {
 	// If there are any filters set, check them.
 	if len(config.Filter.CodeIds) != 0 || len(config.Filter.ContractAddresses) != 0 {
 		found := false
@@ -98,12 +103,12 @@ func NewIndexerWriteListener(config IndexerConfig, parentIndexerListener *Indexe
 		}
 	}
 
-	return &IndexerWriteListener{
+	return &IndexerStateWriteListener{
 		parentIndexerListener: parentIndexerListener,
 		logger:                ctx.Logger(),
 		output:                config.Output,
 
-		queue:     make(map[string]PendingIndexerEvent),
+		queue:     make(map[string]PendingIndexerStateEvent),
 		committed: false,
 
 		// Contract info.
@@ -115,7 +120,7 @@ func NewIndexerWriteListener(config IndexerConfig, parentIndexerListener *Indexe
 }
 
 // Add write events to queue.
-func (wl *IndexerWriteListener) OnWrite(storeKey sdkstoretypes.StoreKey, key []byte, value []byte, delete bool) error {
+func (wl *IndexerStateWriteListener) OnWrite(storeKey sdkstoretypes.StoreKey, key []byte, value []byte, delete bool) error {
 	keyBase64 := base64.StdEncoding.EncodeToString(key)
 	valueBase64 := base64.StdEncoding.EncodeToString(value)
 
@@ -125,7 +130,8 @@ func (wl *IndexerWriteListener) OnWrite(storeKey sdkstoretypes.StoreKey, key []b
 	// this unique key.
 	queueKey := wl.contractAddress + keyBase64
 
-	wl.queue[queueKey] = PendingIndexerEvent{
+	wl.queue[queueKey] = PendingIndexerStateEvent{
+		Type:            "state",
 		BlockHeight:     wl.blockHeight,
 		BlockTimeUnixMs: wl.blockTimeUnixMs,
 		ContractAddress: wl.contractAddress,
@@ -139,7 +145,7 @@ func (wl *IndexerWriteListener) OnWrite(storeKey sdkstoretypes.StoreKey, key []b
 }
 
 // Commit entire queue. This should be called if the transaction succeeds.
-func (wl *IndexerWriteListener) commit() {
+func (wl *IndexerStateWriteListener) commit() {
 	// Add all events to parent listener queue if exists.
 	if wl.parentIndexerListener != nil {
 		for k, v := range wl.queue {
@@ -154,7 +160,7 @@ func (wl *IndexerWriteListener) commit() {
 // queue when we committed. Our child listeners added their events to our queue
 // if they committed. The root (parent with no parent) listener will export the
 // whole queue (below) if it commits.
-func (wl *IndexerWriteListener) finish() {
+func (wl *IndexerStateWriteListener) finish() {
 	// Move the current indexer listener pointer up one to our parent. If we are
 	// the root listener, this will be nil.
 	CurrentIndexerListener = wl.parentIndexerListener
@@ -166,7 +172,7 @@ func (wl *IndexerWriteListener) finish() {
 	// Open output file, creating if doesn't exist.
 	file, err := os.OpenFile(wl.output, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		wl.logger.Error("[INDEXER] Failed to open output file", "output", wl.output, "error", err)
+		wl.logger.Error("[INDEXER][wasm/state] Failed to open output file", "output", wl.output, "error", err)
 		panic(err.Error())
 	}
 	defer file.Close()
@@ -178,5 +184,78 @@ func (wl *IndexerWriteListener) finish() {
 		encoder.Encode(event)
 	}
 
-	wl.logger.Info("[INDEXER] Exported events", "blockHeight", wl.blockHeight, "codeId", wl.codeID, "contractAddress", wl.contractAddress, "count", len(wl.queue), "output", wl.output)
+	wl.logger.Info("[INDEXER][wasm/state] Exported events", "blockHeight", wl.blockHeight, "codeId", wl.codeID, "contractAddress", wl.contractAddress, "count", len(wl.queue), "output", wl.output)
+}
+
+// TXs
+
+type IndexerTxEvent struct {
+	Type            string                `json:"type"`
+	BlockHeight     int64                 `json:"blockHeight"`
+	BlockTimeUnixMs int64                 `json:"blockTimeUnixMs"`
+	ContractAddress string                `json:"contractAddress"`
+	CodeId          uint64                `json:"codeId"`
+	Action          string                `json:"action"`
+	Sender          string                `json:"sender"`
+	Msg             string                `json:"msg"`
+	Reply           *wasmvmtypes.Reply    `json:"reply"`
+	Funds           sdktypes.Coins        `json:"funds"`
+	Response        *wasmvmtypes.Response `json:"response"`
+	GasUsed         uint64                `json:"gasUsed"`
+}
+
+type IndexerTxWriter struct {
+	output string
+	file   *os.File
+}
+
+func NewIndexerTxWriter(config IndexerConfig) *IndexerTxWriter {
+	// Open output file, creating if doesn't exist.
+	file, err := os.OpenFile(config.Output, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		panic(fmt.Errorf("[INDEXER][wasm/tx] Failed to open output file. output=%v, error=%w", config.Output, err))
+	}
+
+	return &IndexerTxWriter{
+		output: config.Output,
+		file:   file,
+	}
+}
+
+// Write slash event to file.
+func (iw *IndexerTxWriter) WriteTx(ctx *sdktypes.Context, contractAddress sdktypes.AccAddress, codeID uint64, action string, sender string, msg *[]byte, reply *wasmvmtypes.Reply, funds sdktypes.Coins, response *wasmvmtypes.Response, gasUsed uint64) {
+	// If checking TX (simulating, not actually executing), do not index.
+	if ctx.IsCheckTx() {
+		return
+	}
+
+	encoder := json.NewEncoder(iw.file)
+
+	// Export event.
+	var msgBase64 string
+	if msg != nil {
+		msgBase64 = base64.StdEncoding.EncodeToString(*msg)
+	}
+	event := IndexerTxEvent{
+		Type:            "tx",
+		BlockHeight:     ctx.BlockHeight(),
+		BlockTimeUnixMs: ctx.BlockTime().UnixMilli(),
+		ContractAddress: contractAddress.String(),
+		CodeId:          codeID,
+		Action:          action,
+		Sender:          sender,
+		Msg:             msgBase64,
+		Reply:           reply,
+		Funds:           funds,
+		Response:        response,
+		GasUsed:         gasUsed,
+	}
+	encoder.Encode(event)
+
+	ctx.Logger().Info("[INDEXER][wasm/tx] Exported event", "blockHeight", event.BlockHeight, "contractAddress", event.ContractAddress, "sender", event.Sender, "output", iw.output)
+}
+
+// Close file.
+func (iw *IndexerTxWriter) Close() {
+	iw.file.Close()
 }
