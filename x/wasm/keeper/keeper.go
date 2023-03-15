@@ -87,7 +87,7 @@ var defaultAcceptedAccountTypes = map[reflect.Type]struct{}{
 }
 
 // INDEXER.
-var CurrentIndexerListener *IndexerWriteListener
+var CurrentIndexerListener *IndexerStateWriteListener
 
 // Keeper will have a reference to Wasmer with it's own data directory.
 type Keeper struct {
@@ -110,7 +110,8 @@ type Keeper struct {
 	accountPruner        AccountPruner
 
 	// INDEXER.
-	indexerConfig IndexerConfig
+	indexerConfig   IndexerConfig
+	indexerTxWriter *IndexerTxWriter
 }
 
 // NewKeeper creates a new contract Keeper instance
@@ -143,6 +144,9 @@ func NewKeeper(
 		paramSpace = paramSpace.WithKeyTable(types.ParamKeyTable())
 	}
 
+	indexerConfig := LoadIndexerConfig(filepath.Join(homeDir, ".."))
+	indexerTxWriter := NewIndexerTxWriter(indexerConfig)
+
 	keeper := &Keeper{
 		storeKey:             storeKey,
 		cdc:                  cdc,
@@ -158,7 +162,8 @@ func NewKeeper(
 		gasRegister:          NewDefaultWasmGasRegister(),
 		maxQueryStackSize:    types.DefaultMaxQueryStackSize,
 		acceptedAccountTypes: defaultAcceptedAccountTypes,
-		indexerConfig:        LoadIndexerConfig(filepath.Join(homeDir, "..")),
+		indexerConfig:        indexerConfig,
+		indexerTxWriter:      indexerTxWriter,
 	}
 	keeper.wasmVMQueryHandler = DefaultQueryPlugins(bankKeeper, stakingKeeper, distKeeper, channelKeeper, queryRouter, keeper)
 	for _, o := range opts {
@@ -170,7 +175,7 @@ func NewKeeper(
 }
 
 // INDEXER: Listen to KV Store changes.
-func (k Keeper) attachIndexer(prefixStore *prefix.Store, ctx *sdk.Context, contractAddress sdk.AccAddress, codeID uint64) (sdkstore.KVStore, *IndexerWriteListener) {
+func (k Keeper) attachIndexer(prefixStore *prefix.Store, ctx *sdk.Context, contractAddress sdk.AccAddress, codeID uint64) (sdkstore.KVStore, *IndexerStateWriteListener) {
 	// If checking TX (simulating, not actually executing), do not attach indexer.
 	// Return prefixStore not wrapped with listenkv.
 	if ctx.IsCheckTx() {
@@ -178,7 +183,7 @@ func (k Keeper) attachIndexer(prefixStore *prefix.Store, ctx *sdk.Context, contr
 	}
 
 	// Create new listener.
-	listener := NewIndexerWriteListener(
+	listener := NewIndexerStateWriteListener(
 		k.indexerConfig,
 		CurrentIndexerListener,
 		ctx,
@@ -452,13 +457,16 @@ func (k Keeper) instantiate(
 		sdk.NewAttribute(types.AttributeKeyCodeID, strconv.FormatUint(codeID, 10)),
 	))
 
+	// INDEXER: Write tx before sub-messages are dispatched.
+	k.indexerTxWriter.WriteTx(&ctx, contractAddress, codeID, "instantiate", creator.String(), &initMsg, nil, deposit, res, gasUsed)
+
 	data, err := k.handleContractResponse(ctx, contractAddress, contractInfo.IBCPortID, res.Messages, res.Attributes, res.Data, res.Events)
 	if err != nil {
 		return nil, nil, sdkerrors.Wrap(err, "dispatch")
 	}
 
+	// INDEXER: On success, commit, after sub-messages are dispatched.
 	if listener != nil {
-		// INDEXER: On success, commit.
 		listener.commit()
 	}
 
@@ -510,13 +518,16 @@ func (k Keeper) execute(ctx sdk.Context, contractAddress sdk.AccAddress, caller 
 		sdk.NewAttribute(types.AttributeKeyContractAddr, contractAddress.String()),
 	))
 
+	// INDEXER: Write tx before sub-messages are dispatched.
+	k.indexerTxWriter.WriteTx(&ctx, contractAddress, contractInfo.CodeID, "execute", caller.String(), &msg, nil, coins, res, gasUsed)
+
 	data, err := k.handleContractResponse(ctx, contractAddress, contractInfo.IBCPortID, res.Messages, res.Attributes, res.Data, res.Events)
 	if err != nil {
 		return nil, sdkerrors.Wrap(err, "dispatch")
 	}
 
+	// INDEXER: On success, commit, after sub-messages are dispatched.
 	if listener != nil {
-		// INDEXER: On success, commit.
 		listener.commit()
 	}
 
@@ -596,13 +607,16 @@ func (k Keeper) migrate(ctx sdk.Context, contractAddress sdk.AccAddress, caller 
 		sdk.NewAttribute(types.AttributeKeyContractAddr, contractAddress.String()),
 	))
 
+	// INDEXER: Write tx before sub-messages are dispatched.
+	k.indexerTxWriter.WriteTx(&ctx, contractAddress, newCodeID, "migrate", caller.String(), &msg, nil, sdk.NewCoins(), res, gasUsed)
+
 	data, err := k.handleContractResponse(ctx, contractAddress, contractInfo.IBCPortID, res.Messages, res.Attributes, res.Data, res.Events)
 	if err != nil {
 		return nil, sdkerrors.Wrap(err, "dispatch")
 	}
 
+	// INDEXER: On success, commit, after sub-messages are dispatched.
 	if listener != nil {
-		// INDEXER: On success, commit.
 		listener.commit()
 	}
 
@@ -644,13 +658,16 @@ func (k Keeper) Sudo(ctx sdk.Context, contractAddress sdk.AccAddress, msg []byte
 		sdk.NewAttribute(types.AttributeKeyContractAddr, contractAddress.String()),
 	))
 
+	// INDEXER: Write tx before sub-messages are dispatched.
+	k.indexerTxWriter.WriteTx(&ctx, contractAddress, contractInfo.CodeID, "sudo", "sudo", &msg, nil, sdk.NewCoins(), res, gasUsed)
+
 	data, err := k.handleContractResponse(ctx, contractAddress, contractInfo.IBCPortID, res.Messages, res.Attributes, res.Data, res.Events)
 	if err != nil {
 		return nil, sdkerrors.Wrap(err, "dispatch")
 	}
 
+	// INDEXER: On success, commit, after sub-messages are dispatched.
 	if listener != nil {
-		// INDEXER: On success, commit.
 		listener.commit()
 	}
 
@@ -691,13 +708,16 @@ func (k Keeper) reply(ctx sdk.Context, contractAddress sdk.AccAddress, reply was
 		sdk.NewAttribute(types.AttributeKeyContractAddr, contractAddress.String()),
 	))
 
+	// INDEXER: Write tx before sub-messages are dispatched.
+	k.indexerTxWriter.WriteTx(&ctx, contractAddress, contractInfo.CodeID, "reply", "reply", nil, &reply, sdk.NewCoins(), res, gasUsed)
+
 	data, err := k.handleContractResponse(ctx, contractAddress, contractInfo.IBCPortID, res.Messages, res.Attributes, res.Data, res.Events)
 	if err != nil {
 		return nil, sdkerrors.Wrap(err, "dispatch")
 	}
 
+	// INDEXER: On success, commit, after sub-messages are dispatched.
 	if listener != nil {
-		// INDEXER: On success, commit.
 		listener.commit()
 	}
 
