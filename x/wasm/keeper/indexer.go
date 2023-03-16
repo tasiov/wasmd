@@ -10,7 +10,6 @@ import (
 	wasmvmtypes "github.com/CosmWasm/wasmvm/types"
 	sdkstoretypes "github.com/cosmos/cosmos-sdk/store/types"
 	sdktypes "github.com/cosmos/cosmos-sdk/types"
-	"github.com/tendermint/tendermint/libs/log"
 )
 
 type IndexerConfigFilter struct {
@@ -59,9 +58,9 @@ type PendingIndexerStateEvent struct {
 }
 
 type IndexerStateWriteListener struct {
-	parentIndexerListener *IndexerStateWriteListener
-	logger                log.Logger
-	output                string
+	parentListener *IndexerStateWriteListener
+	ctx            *sdktypes.Context
+	output         string
 
 	queue     map[string]PendingIndexerStateEvent
 	committed bool
@@ -69,11 +68,9 @@ type IndexerStateWriteListener struct {
 	// Contract info.
 	contractAddress string
 	codeID          uint64
-	blockHeight     int64
-	blockTimeUnixMs int64
 }
 
-func NewIndexerStateWriteListener(config IndexerConfig, parentIndexerListener *IndexerStateWriteListener, ctx *sdktypes.Context, contractAddress sdktypes.AccAddress, codeID uint64) *IndexerStateWriteListener {
+func NewIndexerStateWriteListener(config IndexerConfig, parentListener *IndexerStateWriteListener, ctx *sdktypes.Context, contractAddress sdktypes.AccAddress, codeID uint64) *IndexerStateWriteListener {
 	// If there are any filters set, check them.
 	if len(config.Filter.CodeIds) != 0 || len(config.Filter.ContractAddresses) != 0 {
 		found := false
@@ -104,9 +101,9 @@ func NewIndexerStateWriteListener(config IndexerConfig, parentIndexerListener *I
 	}
 
 	return &IndexerStateWriteListener{
-		parentIndexerListener: parentIndexerListener,
-		logger:                ctx.Logger(),
-		output:                config.Output,
+		parentListener: parentListener,
+		ctx:            ctx,
+		output:         config.Output,
 
 		queue:     make(map[string]PendingIndexerStateEvent),
 		committed: false,
@@ -114,8 +111,6 @@ func NewIndexerStateWriteListener(config IndexerConfig, parentIndexerListener *I
 		// Contract info.
 		contractAddress: contractAddress.String(),
 		codeID:          codeID,
-		blockHeight:     ctx.BlockHeight(),
-		blockTimeUnixMs: ctx.BlockTime().UnixMilli(),
 	}
 }
 
@@ -132,8 +127,8 @@ func (wl *IndexerStateWriteListener) OnWrite(storeKey sdkstoretypes.StoreKey, ke
 
 	wl.queue[queueKey] = PendingIndexerStateEvent{
 		Type:            "state",
-		BlockHeight:     wl.blockHeight,
-		BlockTimeUnixMs: wl.blockTimeUnixMs,
+		BlockHeight:     wl.ctx.BlockHeight(),
+		BlockTimeUnixMs: wl.ctx.BlockTime().UnixMilli(),
 		ContractAddress: wl.contractAddress,
 		CodeId:          wl.codeID,
 		Key:             keyBase64,
@@ -147,9 +142,9 @@ func (wl *IndexerStateWriteListener) OnWrite(storeKey sdkstoretypes.StoreKey, ke
 // Commit entire queue. This should be called if the transaction succeeds.
 func (wl *IndexerStateWriteListener) commit() {
 	// Add all events to parent listener queue if exists.
-	if wl.parentIndexerListener != nil {
+	if wl.parentListener != nil {
 		for k, v := range wl.queue {
-			wl.parentIndexerListener.queue[k] = v
+			wl.parentListener.queue[k] = v
 		}
 	}
 	wl.committed = true
@@ -163,16 +158,16 @@ func (wl *IndexerStateWriteListener) commit() {
 func (wl *IndexerStateWriteListener) finish() {
 	// Move the current indexer listener pointer up one to our parent. If we are
 	// the root listener, this will be nil.
-	CurrentIndexerListener = wl.parentIndexerListener
+	CurrentIndexerStateListener = wl.parentListener
 
-	if !wl.committed || wl.parentIndexerListener != nil {
+	if !wl.committed || wl.parentListener != nil {
 		return
 	}
 
 	// Open output file, creating if doesn't exist.
 	file, err := os.OpenFile(wl.output, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		wl.logger.Error("[INDEXER][wasm/state] Failed to open output file", "output", wl.output, "error", err)
+		wl.ctx.Logger().Error("[INDEXER][wasm/state] Failed to open output file", "output", wl.output, "error", err)
 		panic(err.Error())
 	}
 	defer file.Close()
@@ -184,32 +179,44 @@ func (wl *IndexerStateWriteListener) finish() {
 		encoder.Encode(event)
 	}
 
-	wl.logger.Info("[INDEXER][wasm/state] Exported events", "blockHeight", wl.blockHeight, "codeId", wl.codeID, "contractAddress", wl.contractAddress, "count", len(wl.queue), "output", wl.output)
+	wl.ctx.Logger().Info("[INDEXER][wasm/state] Exported events", "blockHeight", wl.ctx.BlockHeight(), "codeId", wl.codeID, "contractAddress", wl.contractAddress, "count", len(wl.queue), "output", wl.output)
 }
 
 // TXs
 
 type IndexerTxEvent struct {
-	Type            string                `json:"type"`
-	BlockHeight     int64                 `json:"blockHeight"`
-	BlockTimeUnixMs int64                 `json:"blockTimeUnixMs"`
-	ContractAddress string                `json:"contractAddress"`
-	CodeId          uint64                `json:"codeId"`
-	Action          string                `json:"action"`
-	Sender          string                `json:"sender"`
-	Msg             string                `json:"msg"`
-	Reply           *wasmvmtypes.Reply    `json:"reply"`
-	Funds           sdktypes.Coins        `json:"funds"`
-	Response        *wasmvmtypes.Response `json:"response"`
-	GasUsed         uint64                `json:"gasUsed"`
+	Type             string                `json:"type"`
+	BlockHeight      int64                 `json:"blockHeight"`
+	BlockTimeUnixMs  int64                 `json:"blockTimeUnixMs"`
+	TransactionIndex uint32                `json:"transactionIndex"`
+	MessageId        string                `json:"messageId"`
+	ContractAddress  string                `json:"contractAddress"`
+	CodeId           uint64                `json:"codeId"`
+	Action           string                `json:"action"`
+	Sender           string                `json:"sender"`
+	Msg              string                `json:"msg"`
+	Reply            *wasmvmtypes.Reply    `json:"reply"`
+	Funds            sdktypes.Coins        `json:"funds"`
+	Response         *wasmvmtypes.Response `json:"response"`
+	GasUsed          uint64                `json:"gasUsed"`
 }
 
 type IndexerTxWriter struct {
-	output string
-	file   *os.File
+	parentWriter *IndexerTxWriter
+	output       string
+	file         *os.File
+
+	ctx *sdktypes.Context
+	env *wasmvmtypes.Env
+
+	// The message index of the current message within its lineage of messages.
+	// This will be appended to a string of all message indexes in the lineage
+	// traversed via the parent writer to generate a unique message ID for every
+	// message within a given transaction within a given block.
+	messageIndex uint32
 }
 
-func NewIndexerTxWriter(config IndexerConfig) *IndexerTxWriter {
+func NewIndexerTxWriter(config IndexerConfig, parentWriter *IndexerTxWriter, ctx *sdktypes.Context, env *wasmvmtypes.Env, messageIndex uint32) *IndexerTxWriter {
 	// Open output file, creating if doesn't exist.
 	file, err := os.OpenFile(config.Output, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
@@ -217,15 +224,49 @@ func NewIndexerTxWriter(config IndexerConfig) *IndexerTxWriter {
 	}
 
 	return &IndexerTxWriter{
-		output: config.Output,
-		file:   file,
+		parentWriter: parentWriter,
+		output:       config.Output,
+		file:         file,
+
+		ctx: ctx,
+		env: env,
+
+		messageIndex: messageIndex,
 	}
 }
 
-// Write slash event to file.
-func (iw *IndexerTxWriter) WriteTx(ctx *sdktypes.Context, contractAddress sdktypes.AccAddress, codeID uint64, action string, sender string, msg *[]byte, reply *wasmvmtypes.Reply, funds sdktypes.Coins, response *wasmvmtypes.Response, gasUsed uint64) {
+func (iw *IndexerTxWriter) getMessageId() string {
+	currentMessageId := fmt.Sprintf("%d", iw.messageIndex)
+
+	// If we have a parent writer, append our message index to its message ID.
+	if iw.parentWriter != nil {
+		return iw.parentWriter.getMessageId() + "." + currentMessageId
+	}
+
+	// Otherwise, we are the root writer, so just use our local message ID.
+	return currentMessageId
+}
+
+func (iw *IndexerTxWriter) finish() {
+	// Move the current indexer writer pointer up one to our parent. If we are
+	// the root writer, this will be nil.
+	CurrentIndexerTxWriter = iw.parentWriter
+
+	// Increment the current indexer message index. If we have a parent writer, go
+	// back to its message index before incrementing.
+	if iw.parentWriter != nil {
+		CurrentIndexerTxMessageIndex = iw.parentWriter.messageIndex
+	}
+	CurrentIndexerTxMessageIndex++
+
+	// Close file.
+	iw.file.Close()
+}
+
+// Write tx event to file.
+func (iw *IndexerTxWriter) writeTx(contractAddress sdktypes.AccAddress, codeID uint64, action string, sender string, msg *[]byte, reply *wasmvmtypes.Reply, funds sdktypes.Coins, response *wasmvmtypes.Response, gasUsed uint64) {
 	// If checking TX (simulating, not actually executing), do not index.
-	if ctx.IsCheckTx() {
+	if iw.ctx.IsCheckTx() {
 		return
 	}
 
@@ -237,22 +278,24 @@ func (iw *IndexerTxWriter) WriteTx(ctx *sdktypes.Context, contractAddress sdktyp
 		msgBase64 = base64.StdEncoding.EncodeToString(*msg)
 	}
 	event := IndexerTxEvent{
-		Type:            "tx",
-		BlockHeight:     ctx.BlockHeight(),
-		BlockTimeUnixMs: ctx.BlockTime().UnixMilli(),
-		ContractAddress: contractAddress.String(),
-		CodeId:          codeID,
-		Action:          action,
-		Sender:          sender,
-		Msg:             msgBase64,
-		Reply:           reply,
-		Funds:           funds,
-		Response:        response,
-		GasUsed:         gasUsed,
+		Type:             "tx",
+		BlockHeight:      iw.ctx.BlockHeight(),
+		BlockTimeUnixMs:  iw.ctx.BlockTime().UnixMilli(),
+		TransactionIndex: iw.env.Transaction.Index,
+		MessageId:        iw.getMessageId(),
+		ContractAddress:  contractAddress.String(),
+		CodeId:           codeID,
+		Action:           action,
+		Sender:           sender,
+		Msg:              msgBase64,
+		Reply:            reply,
+		Funds:            funds,
+		Response:         response,
+		GasUsed:          gasUsed,
 	}
 	encoder.Encode(event)
 
-	ctx.Logger().Info("[INDEXER][wasm/tx] Exported event", "blockHeight", event.BlockHeight, "contractAddress", event.ContractAddress, "sender", event.Sender, "output", iw.output)
+	iw.ctx.Logger().Info("[INDEXER][wasm/tx] Exported event", "blockHeight", event.BlockHeight, "transactionIndex", event.TransactionIndex, "messageId", event.MessageId, "contractAddress", event.ContractAddress, "sender", event.Sender, "output", iw.output)
 }
 
 // Close file.
