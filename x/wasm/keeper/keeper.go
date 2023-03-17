@@ -91,7 +91,7 @@ var CurrentIndexerStateListener *IndexerStateWriteListener
 var CurrentIndexerTxWriter *IndexerTxWriter
 var CurrentIndexerTxBlockHeight int64
 var CurrentIndexerTxIndex uint32
-var CurrentIndexerTxMessageIndex uint32
+var CurrentIndexerTxRootMessageIndex uint32
 
 // Keeper will have a reference to Wasmer with it's own data directory.
 type Keeper struct {
@@ -208,11 +208,24 @@ func (k Keeper) setupIndexer(ctx *sdk.Context, env *wasmvmtypes.Env, prefixStore
 		stateListener,
 	})
 
-	// Update TX writer parameters. If a new block height or transaction index
-	// occurs, reset the message index. Message index will be incremented
-	// automatically by the TX writer when it finishes.
+	// For the TX writer, start message index at 0 if a new block height,
+	// transaction index, or if we're not the root writer. If we're not the root
+	// writer, then we're a sub writer and our message ID will be composed of our
+	// lineage of parent writer message IDs and we are starting a new chain of
+	// sub-messages. If we are the root writer, we need to use the
+	// transaction-level message index, which happens below when the block height
+	// is the same, the transaction index is the same, and there is no current
+	// writer.
+	txWriterMessageIndex := uint32(0)
+
+	// If a new block height or transaction index occurs, reset the message index.
+	// Message index will be incremented automatically by the TX writer when it
+	// finishes. If we are on the same block and transaction index, and there is
+	// no parent writer, use the root message index.
 	if CurrentIndexerTxBlockHeight != ctx.BlockHeight() || env.Transaction.Index != CurrentIndexerTxIndex {
-		CurrentIndexerTxMessageIndex = 0
+		CurrentIndexerTxRootMessageIndex = 0
+	} else if CurrentIndexerTxWriter == nil {
+		txWriterMessageIndex = CurrentIndexerTxRootMessageIndex
 	}
 
 	// Update the current values of the block height and transaction index.
@@ -225,7 +238,7 @@ func (k Keeper) setupIndexer(ctx *sdk.Context, env *wasmvmtypes.Env, prefixStore
 		CurrentIndexerTxWriter,
 		ctx,
 		env,
-		CurrentIndexerTxMessageIndex,
+		txWriterMessageIndex,
 	)
 
 	// Update CurrentIndexerTxWriter.

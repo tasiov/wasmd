@@ -252,12 +252,13 @@ func (iw *IndexerTxWriter) finish() {
 	// the root writer, this will be nil.
 	CurrentIndexerTxWriter = iw.parentWriter
 
-	// Increment the current indexer message index. If we have a parent writer, go
-	// back to its message index before incrementing.
+	// Increment the parent indexer's message index. If no parent, increment
+	// the root TX-level message index.
 	if iw.parentWriter != nil {
-		CurrentIndexerTxMessageIndex = iw.parentWriter.messageIndex
+		iw.parentWriter.messageIndex++
+	} else {
+		CurrentIndexerTxRootMessageIndex++
 	}
-	CurrentIndexerTxMessageIndex++
 
 	// Close file.
 	iw.file.Close()
