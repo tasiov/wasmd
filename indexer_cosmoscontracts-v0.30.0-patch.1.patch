@@ -45,10 +45,10 @@ index c7b2fad..6f8e5e9 100644
  github.com/cosmos/go-bip39 v0.0.0-20180819234021-555e2067c45d/go.mod h1:tSxLoYXyBmiFeKpvmq4dzayMdCjCnu8uqmCysIGBT2Y=
 diff --git a/x/wasm/keeper/indexer.go b/x/wasm/keeper/indexer.go
 new file mode 100644
-index 0000000..2d6dbd5
+index 0000000..830c55a
 --- /dev/null
 +++ b/x/wasm/keeper/indexer.go
-@@ -0,0 +1,305 @@
+@@ -0,0 +1,318 @@
 +package keeper
 +
 +import (
@@ -260,18 +260,30 @@ index 0000000..2d6dbd5
 +	ctx *sdktypes.Context
 +	env *wasmvmtypes.Env
 +
-+	// The message index of the current message within its lineage of messages.
-+	// This will be appended to a string of all message indexes in the lineage
++	// The message index of the current message within its lineage of messages
++	// will be appended to a string of all message indexes in the lineage
 +	// traversed via the parent writer to generate a unique message ID for every
-+	// message within a given transaction within a given block.
-+	messageIndex uint32
++	// message within a given transaction within a given block. The sub-message
++	// index tracks the sub-writers to give them the appropriate index. The
++	// sub-message index is incremented when each of our sub-writers finishes.
++	messageIndex    uint32
++	subMessageIndex uint32
 +}
 +
-+func NewIndexerTxWriter(config IndexerConfig, parentWriter *IndexerTxWriter, ctx *sdktypes.Context, env *wasmvmtypes.Env, messageIndex uint32) *IndexerTxWriter {
++func NewIndexerTxWriter(config IndexerConfig, parentWriter *IndexerTxWriter, ctx *sdktypes.Context, env *wasmvmtypes.Env) *IndexerTxWriter {
 +	// Open output file, creating if doesn't exist.
 +	file, err := os.OpenFile(config.Output, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 +	if err != nil {
 +		panic(fmt.Errorf("[INDEXER][wasm/tx] Failed to open output file. output=%v, error=%w", config.Output, err))
++	}
++
++	var messageIndex uint32
++	// If we have a parent writer, use its sub message index. Otherwise, use the
++	// root TX-level message index.
++	if parentWriter != nil {
++		messageIndex = parentWriter.subMessageIndex
++	} else {
++		messageIndex = CurrentIndexerTxRootMessageIndex
 +	}
 +
 +	return &IndexerTxWriter{
@@ -282,7 +294,8 @@ index 0000000..2d6dbd5
 +		ctx: ctx,
 +		env: env,
 +
-+		messageIndex: messageIndex,
++		messageIndex:    messageIndex,
++		subMessageIndex: 0,
 +	}
 +}
 +
@@ -299,14 +312,14 @@ index 0000000..2d6dbd5
 +}
 +
 +func (iw *IndexerTxWriter) finish() {
-+	// Move the current indexer writer pointer up one to our parent. If we are
-+	// the root writer, this will be nil.
++	// Move the current indexer writer pointer up to our parent. If we are the
++	// root writer, this will be nil.
 +	CurrentIndexerTxWriter = iw.parentWriter
 +
-+	// Increment the parent indexer's message index. If no parent, increment
++	// Increment the parent indexer's sub-message index. If no parent, increment
 +	// the root TX-level message index.
 +	if iw.parentWriter != nil {
-+		iw.parentWriter.messageIndex++
++		iw.parentWriter.subMessageIndex++
 +	} else {
 +		CurrentIndexerTxRootMessageIndex++
 +	}
@@ -355,7 +368,7 @@ index 0000000..2d6dbd5
 +	iw.file.Close()
 +}
 diff --git a/x/wasm/keeper/keeper.go b/x/wasm/keeper/keeper.go
-index 0f6e1d2..412bcb7 100644
+index 0f6e1d2..ed9f2ae 100644
 --- a/x/wasm/keeper/keeper.go
 +++ b/x/wasm/keeper/keeper.go
 @@ -16,6 +16,7 @@ import (
@@ -416,7 +429,7 @@ index 0f6e1d2..412bcb7 100644
  	}
  	keeper.wasmVMQueryHandler = DefaultQueryPlugins(bankKeeper, stakingKeeper, distKeeper, channelKeeper, keeper)
  	for _, o := range opts {
-@@ -159,6 +175,78 @@ func NewKeeper(
+@@ -159,6 +175,66 @@ func NewKeeper(
  	return *keeper
  }
  
@@ -453,24 +466,13 @@ index 0f6e1d2..412bcb7 100644
 +		stateListener,
 +	})
 +
-+	// For the TX writer, start message index at 0 if a new block height,
-+	// transaction index, or if we're not the root writer. If we're not the root
-+	// writer, then we're a sub writer and our message ID will be composed of our
-+	// lineage of parent writer message IDs and we are starting a new chain of
-+	// sub-messages. If we are the root writer, we need to use the
-+	// transaction-level message index, which happens below when the block height
-+	// is the same, the transaction index is the same, and there is no current
-+	// writer.
-+	txWriterMessageIndex := uint32(0)
-+
-+	// If a new block height or transaction index occurs, reset the message index.
-+	// Message index will be incremented automatically by the TX writer when it
-+	// finishes. If we are on the same block and transaction index, and there is
-+	// no parent writer, use the root message index.
++	// If on a new block height or transaction index, reset the root-level message
++	// index. The appropriate message index (the root-level or a parent's
++	// sub-message index) will be incremented automatically by the TX writer when
++	// it finishes.
 +	if CurrentIndexerTxBlockHeight != ctx.BlockHeight() || env.Transaction.Index != CurrentIndexerTxIndex {
++		CurrentIndexerTxWriter = nil
 +		CurrentIndexerTxRootMessageIndex = 0
-+	} else if CurrentIndexerTxWriter == nil {
-+		txWriterMessageIndex = CurrentIndexerTxRootMessageIndex
 +	}
 +
 +	// Update the current values of the block height and transaction index.
@@ -483,7 +485,6 @@ index 0f6e1d2..412bcb7 100644
 +		CurrentIndexerTxWriter,
 +		ctx,
 +		env,
-+		txWriterMessageIndex,
 +	)
 +
 +	// Update CurrentIndexerTxWriter.
@@ -495,7 +496,7 @@ index 0f6e1d2..412bcb7 100644
  func (k Keeper) getUploadAccessConfig(ctx sdk.Context) types.AccessConfig {
  	var a types.AccessConfig
  	k.paramSpace.Get(ctx, types.ParamStoreKeyUploadAccess, &a)
-@@ -361,12 +449,21 @@ func (k Keeper) instantiate(
+@@ -361,12 +437,21 @@ func (k Keeper) instantiate(
  	prefixStoreKey := types.GetContractStorePrefix(contractAddress)
  	prefixStore := prefix.NewStore(ctx.KVStore(k.storeKey), prefixStoreKey)
  
@@ -518,7 +519,7 @@ index 0f6e1d2..412bcb7 100644
  	k.consumeRuntimeGas(ctx, gasUsed)
  	if err != nil {
  		return nil, nil, sdkerrors.Wrap(types.ErrInstantiateFailed, err.Error())
-@@ -403,11 +500,19 @@ func (k Keeper) instantiate(
+@@ -403,11 +488,19 @@ func (k Keeper) instantiate(
  		sdk.NewAttribute(types.AttributeKeyCodeID, strconv.FormatUint(codeID, 10)),
  	))
  
@@ -538,7 +539,7 @@ index 0f6e1d2..412bcb7 100644
  	return contractAddress, data, nil
  }
  
-@@ -436,10 +541,19 @@ func (k Keeper) execute(ctx sdk.Context, contractAddress sdk.AccAddress, caller
+@@ -436,10 +529,19 @@ func (k Keeper) execute(ctx sdk.Context, contractAddress sdk.AccAddress, caller
  	env := types.NewEnv(ctx, contractAddress)
  	info := types.NewInfo(caller, coins)
  
@@ -559,7 +560,7 @@ index 0f6e1d2..412bcb7 100644
  	k.consumeRuntimeGas(ctx, gasUsed)
  	if execErr != nil {
  		return nil, sdkerrors.Wrap(types.ErrExecuteFailed, execErr.Error())
-@@ -450,11 +564,19 @@ func (k Keeper) execute(ctx sdk.Context, contractAddress sdk.AccAddress, caller
+@@ -450,11 +552,19 @@ func (k Keeper) execute(ctx sdk.Context, contractAddress sdk.AccAddress, caller
  		sdk.NewAttribute(types.AttributeKeyContractAddr, contractAddress.String()),
  	))
  
@@ -579,7 +580,7 @@ index 0f6e1d2..412bcb7 100644
  	return data, nil
  }
  
-@@ -503,8 +625,18 @@ func (k Keeper) migrate(ctx sdk.Context, contractAddress sdk.AccAddress, caller
+@@ -503,8 +613,18 @@ func (k Keeper) migrate(ctx sdk.Context, contractAddress sdk.AccAddress, caller
  
  	prefixStoreKey := types.GetContractStorePrefix(contractAddress)
  	prefixStore := prefix.NewStore(ctx.KVStore(k.storeKey), prefixStoreKey)
@@ -599,7 +600,7 @@ index 0f6e1d2..412bcb7 100644
  	k.consumeRuntimeGas(ctx, gasUsed)
  	if err != nil {
  		return nil, sdkerrors.Wrap(types.ErrMigrationFailed, err.Error())
-@@ -523,11 +655,19 @@ func (k Keeper) migrate(ctx sdk.Context, contractAddress sdk.AccAddress, caller
+@@ -523,11 +643,19 @@ func (k Keeper) migrate(ctx sdk.Context, contractAddress sdk.AccAddress, caller
  		sdk.NewAttribute(types.AttributeKeyContractAddr, contractAddress.String()),
  	))
  
@@ -619,7 +620,7 @@ index 0f6e1d2..412bcb7 100644
  	return data, nil
  }
  
-@@ -546,10 +686,19 @@ func (k Keeper) Sudo(ctx sdk.Context, contractAddress sdk.AccAddress, msg []byte
+@@ -546,10 +674,19 @@ func (k Keeper) Sudo(ctx sdk.Context, contractAddress sdk.AccAddress, msg []byte
  
  	env := types.NewEnv(ctx, contractAddress)
  
@@ -640,7 +641,7 @@ index 0f6e1d2..412bcb7 100644
  	k.consumeRuntimeGas(ctx, gasUsed)
  	if execErr != nil {
  		return nil, sdkerrors.Wrap(types.ErrExecuteFailed, execErr.Error())
-@@ -560,11 +709,19 @@ func (k Keeper) Sudo(ctx sdk.Context, contractAddress sdk.AccAddress, msg []byte
+@@ -560,11 +697,19 @@ func (k Keeper) Sudo(ctx sdk.Context, contractAddress sdk.AccAddress, msg []byte
  		sdk.NewAttribute(types.AttributeKeyContractAddr, contractAddress.String()),
  	))
  
@@ -660,7 +661,7 @@ index 0f6e1d2..412bcb7 100644
  	return data, nil
  }
  
-@@ -581,11 +738,20 @@ func (k Keeper) reply(ctx sdk.Context, contractAddress sdk.AccAddress, reply was
+@@ -581,11 +726,20 @@ func (k Keeper) reply(ctx sdk.Context, contractAddress sdk.AccAddress, reply was
  
  	env := types.NewEnv(ctx, contractAddress)
  
@@ -682,7 +683,7 @@ index 0f6e1d2..412bcb7 100644
  	k.consumeRuntimeGas(ctx, gasUsed)
  	if execErr != nil {
  		return nil, sdkerrors.Wrap(types.ErrExecuteFailed, execErr.Error())
-@@ -596,11 +762,19 @@ func (k Keeper) reply(ctx sdk.Context, contractAddress sdk.AccAddress, reply was
+@@ -596,11 +750,19 @@ func (k Keeper) reply(ctx sdk.Context, contractAddress sdk.AccAddress, reply was
  		sdk.NewAttribute(types.AttributeKeyContractAddr, contractAddress.String()),
  	))
  

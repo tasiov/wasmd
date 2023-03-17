@@ -208,24 +208,13 @@ func (k Keeper) setupIndexer(ctx *sdk.Context, env *wasmvmtypes.Env, prefixStore
 		stateListener,
 	})
 
-	// For the TX writer, start message index at 0 if a new block height,
-	// transaction index, or if we're not the root writer. If we're not the root
-	// writer, then we're a sub writer and our message ID will be composed of our
-	// lineage of parent writer message IDs and we are starting a new chain of
-	// sub-messages. If we are the root writer, we need to use the
-	// transaction-level message index, which happens below when the block height
-	// is the same, the transaction index is the same, and there is no current
-	// writer.
-	txWriterMessageIndex := uint32(0)
-
-	// If a new block height or transaction index occurs, reset the message index.
-	// Message index will be incremented automatically by the TX writer when it
-	// finishes. If we are on the same block and transaction index, and there is
-	// no parent writer, use the root message index.
+	// If on a new block height or transaction index, reset the root-level message
+	// index. The appropriate message index (the root-level or a parent's
+	// sub-message index) will be incremented automatically by the TX writer when
+	// it finishes.
 	if CurrentIndexerTxBlockHeight != ctx.BlockHeight() || env.Transaction.Index != CurrentIndexerTxIndex {
+		CurrentIndexerTxWriter = nil
 		CurrentIndexerTxRootMessageIndex = 0
-	} else if CurrentIndexerTxWriter == nil {
-		txWriterMessageIndex = CurrentIndexerTxRootMessageIndex
 	}
 
 	// Update the current values of the block height and transaction index.
@@ -238,7 +227,6 @@ func (k Keeper) setupIndexer(ctx *sdk.Context, env *wasmvmtypes.Env, prefixStore
 		CurrentIndexerTxWriter,
 		ctx,
 		env,
-		txWriterMessageIndex,
 	)
 
 	// Update CurrentIndexerTxWriter.

@@ -209,18 +209,30 @@ type IndexerTxWriter struct {
 	ctx *sdktypes.Context
 	env *wasmvmtypes.Env
 
-	// The message index of the current message within its lineage of messages.
-	// This will be appended to a string of all message indexes in the lineage
+	// The message index of the current message within its lineage of messages
+	// will be appended to a string of all message indexes in the lineage
 	// traversed via the parent writer to generate a unique message ID for every
-	// message within a given transaction within a given block.
-	messageIndex uint32
+	// message within a given transaction within a given block. The sub-message
+	// index tracks the sub-writers to give them the appropriate index. The
+	// sub-message index is incremented when each of our sub-writers finishes.
+	messageIndex    uint32
+	subMessageIndex uint32
 }
 
-func NewIndexerTxWriter(config IndexerConfig, parentWriter *IndexerTxWriter, ctx *sdktypes.Context, env *wasmvmtypes.Env, messageIndex uint32) *IndexerTxWriter {
+func NewIndexerTxWriter(config IndexerConfig, parentWriter *IndexerTxWriter, ctx *sdktypes.Context, env *wasmvmtypes.Env) *IndexerTxWriter {
 	// Open output file, creating if doesn't exist.
 	file, err := os.OpenFile(config.Output, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		panic(fmt.Errorf("[INDEXER][wasm/tx] Failed to open output file. output=%v, error=%w", config.Output, err))
+	}
+
+	var messageIndex uint32
+	// If we have a parent writer, use its sub message index. Otherwise, use the
+	// root TX-level message index.
+	if parentWriter != nil {
+		messageIndex = parentWriter.subMessageIndex
+	} else {
+		messageIndex = CurrentIndexerTxRootMessageIndex
 	}
 
 	return &IndexerTxWriter{
@@ -231,7 +243,8 @@ func NewIndexerTxWriter(config IndexerConfig, parentWriter *IndexerTxWriter, ctx
 		ctx: ctx,
 		env: env,
 
-		messageIndex: messageIndex,
+		messageIndex:    messageIndex,
+		subMessageIndex: 0,
 	}
 }
 
@@ -248,14 +261,14 @@ func (iw *IndexerTxWriter) getMessageId() string {
 }
 
 func (iw *IndexerTxWriter) finish() {
-	// Move the current indexer writer pointer up one to our parent. If we are
-	// the root writer, this will be nil.
+	// Move the current indexer writer pointer up to our parent. If we are the
+	// root writer, this will be nil.
 	CurrentIndexerTxWriter = iw.parentWriter
 
-	// Increment the parent indexer's message index. If no parent, increment
+	// Increment the parent indexer's sub-message index. If no parent, increment
 	// the root TX-level message index.
 	if iw.parentWriter != nil {
-		iw.parentWriter.messageIndex++
+		iw.parentWriter.subMessageIndex++
 	} else {
 		CurrentIndexerTxRootMessageIndex++
 	}
