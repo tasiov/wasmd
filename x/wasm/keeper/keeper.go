@@ -153,14 +153,18 @@ func (k Keeper) setupIndexer(ctx *sdk.Context, env *wasmvmtypes.Env, prefixStore
 	// index. The appropriate message index (the root-level or a parent's
 	// sub-message index) will be incremented automatically by the TX writer when
 	// it finishes.
-	if CurrentIndexerTxBlockHeight != ctx.BlockHeight() || env.Transaction.Index != CurrentIndexerTxIndex {
+	if CurrentIndexerTxBlockHeight != ctx.BlockHeight() || (env.Transaction != nil && env.Transaction.Index != CurrentIndexerTxIndex) {
 		CurrentIndexerTxWriter = nil
 		CurrentIndexerTxRootMessageIndex = 0
 	}
 
 	// Update the current values of the block height and transaction index.
 	CurrentIndexerTxBlockHeight = ctx.BlockHeight()
-	CurrentIndexerTxIndex = env.Transaction.Index
+	if env.Transaction != nil {
+		CurrentIndexerTxIndex = env.Transaction.Index
+	} else {
+		CurrentIndexerTxIndex = 0
+	}
 
 	// Create TX writer.
 	txWriter := NewIndexerTxWriter(

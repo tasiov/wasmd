@@ -43,8 +43,336 @@ index e7f3303f..a1cd4f7f 100644
  github.com/cosmos/go-bip39 v0.0.0-20180819234021-555e2067c45d/go.mod h1:tSxLoYXyBmiFeKpvmq4dzayMdCjCnu8uqmCysIGBT2Y=
  github.com/cosmos/go-bip39 v1.0.0 h1:pcomnQdrdH22njcAatO0yWojsUnCO3y2tNoV1cb6hHY=
  github.com/cosmos/go-bip39 v1.0.0/go.mod h1:RNJv0H/pOIVgxw6KS7QeX2a0Uo0aKUlfhZ4xuwvCdJw=
+diff --git a/x/wasm/keeper/indexer.go b/x/wasm/keeper/indexer.go
+new file mode 100644
+index 00000000..a681575e
+--- /dev/null
++++ b/x/wasm/keeper/indexer.go
+@@ -0,0 +1,322 @@
++package keeper
++
++import (
++	"encoding/base64"
++	"encoding/json"
++	"fmt"
++	"os"
++	"path/filepath"
++
++	wasmvmtypes "github.com/CosmWasm/wasmvm/types"
++	sdkstoretypes "github.com/cosmos/cosmos-sdk/store/types"
++	sdktypes "github.com/cosmos/cosmos-sdk/types"
++)
++
++type IndexerConfigFilter struct {
++	CodeIds           []uint64 `json:"codeIds"`
++	ContractAddresses []string `json:"contractAddresses"`
++}
++
++type IndexerConfig struct {
++	Filter IndexerConfigFilter `json:"filter"`
++	// Set manually.
++	Output string
++}
++
++func LoadIndexerConfig(wasmdDir string) IndexerConfig {
++	var config IndexerConfig
++	configFile, err := os.Open(filepath.Join(wasmdDir, "indexer", "config.json"))
++	// Read config from file if it exists. Otherwise, use default config.
++	if err == nil {
++		defer configFile.Close()
++		jsonParser := json.NewDecoder(configFile)
++		jsonParser.Decode(&config)
++	}
++
++	// Resolve output path.
++	config.Output = filepath.Join(wasmdDir, "indexer", "wasm.out")
++	// Create folder if doesn't exist.
++	dir := filepath.Dir(config.Output)
++	if _, err := os.Stat(dir); os.IsNotExist(err) {
++		os.MkdirAll(dir, os.ModePerm)
++	}
++
++	return config
++}
++
++// State
++
++type PendingIndexerStateEvent struct {
++	Type            string `json:"type"`
++	BlockHeight     int64  `json:"blockHeight"`
++	BlockTimeUnixMs int64  `json:"blockTimeUnixMs"`
++	ContractAddress string `json:"contractAddress"`
++	CodeId          uint64 `json:"codeId"`
++	Key             string `json:"key"`
++	Value           string `json:"value"`
++	Delete          bool   `json:"delete"`
++}
++
++type IndexerStateWriteListener struct {
++	parentListener *IndexerStateWriteListener
++	ctx            *sdktypes.Context
++	output         string
++
++	queue     map[string]PendingIndexerStateEvent
++	committed bool
++
++	// Contract info.
++	contractAddress string
++	codeID          uint64
++}
++
++func NewIndexerStateWriteListener(config IndexerConfig, parentListener *IndexerStateWriteListener, ctx *sdktypes.Context, contractAddress sdktypes.AccAddress, codeID uint64) *IndexerStateWriteListener {
++	// If there are any filters set, check them.
++	if len(config.Filter.CodeIds) != 0 || len(config.Filter.ContractAddresses) != 0 {
++		found := false
++
++		if len(config.Filter.CodeIds) != 0 {
++			for _, c := range config.Filter.CodeIds {
++				if c == codeID {
++					found = true
++					break
++				}
++			}
++		}
++
++		// Only check contract addresses if we have not yet found a match.
++		if !found && len(config.Filter.ContractAddresses) != 0 {
++			for _, c := range config.Filter.ContractAddresses {
++				if c == contractAddress.String() {
++					found = true
++					break
++				}
++			}
++		}
++
++		// If filter is set and we didn't find a match, don't create a listener.
++		if !found {
++			return nil
++		}
++	}
++
++	return &IndexerStateWriteListener{
++		parentListener: parentListener,
++		ctx:            ctx,
++		output:         config.Output,
++
++		queue:     make(map[string]PendingIndexerStateEvent),
++		committed: false,
++
++		// Contract info.
++		contractAddress: contractAddress.String(),
++		codeID:          codeID,
++	}
++}
++
++// Add write events to queue.
++func (wl *IndexerStateWriteListener) OnWrite(storeKey sdkstoretypes.StoreKey, key []byte, value []byte, delete bool) error {
++	keyBase64 := base64.StdEncoding.EncodeToString(key)
++	valueBase64 := base64.StdEncoding.EncodeToString(value)
++
++	// Values are unique to the pair of contract address and key. The last value
++	// write (set or delete) in a block wins. This listener/queue only exists in
++	// the context of a single block, so we don't need to include block height in
++	// this unique key.
++	queueKey := wl.contractAddress + keyBase64
++
++	wl.queue[queueKey] = PendingIndexerStateEvent{
++		Type:            "state",
++		BlockHeight:     wl.ctx.BlockHeight(),
++		BlockTimeUnixMs: wl.ctx.BlockTime().UnixMilli(),
++		ContractAddress: wl.contractAddress,
++		CodeId:          wl.codeID,
++		Key:             keyBase64,
++		Value:           valueBase64,
++		Delete:          delete,
++	}
++
++	return nil
++}
++
++// Commit entire queue. This should be called if the transaction succeeds.
++func (wl *IndexerStateWriteListener) commit() {
++	// Add all events to parent listener queue if exists.
++	if wl.parentListener != nil {
++		for k, v := range wl.queue {
++			wl.parentListener.queue[k] = v
++		}
++	}
++	wl.committed = true
++}
++
++// If we failed to commit or are not the parent listener, don't export the
++// queue. If we are not the root listener, we added our events to our parent's
++// queue when we committed. Our child listeners added their events to our queue
++// if they committed. The root (parent with no parent) listener will export the
++// whole queue (below) if it commits.
++func (wl *IndexerStateWriteListener) finish() {
++	// Move the current indexer listener pointer up one to our parent. If we are
++	// the root listener, this will be nil.
++	CurrentIndexerStateListener = wl.parentListener
++
++	if !wl.committed || wl.parentListener != nil {
++		return
++	}
++
++	// Open output file, creating if doesn't exist.
++	file, err := os.OpenFile(wl.output, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
++	if err != nil {
++		wl.ctx.Logger().Error("[INDEXER][wasm/state] Failed to open output file", "output", wl.output, "error", err)
++		panic(err.Error())
++	}
++	defer file.Close()
++
++	encoder := json.NewEncoder(file)
++
++	// Export entire queue.
++	for _, event := range wl.queue {
++		encoder.Encode(event)
++	}
++
++	wl.ctx.Logger().Info("[INDEXER][wasm/state] Exported events", "blockHeight", wl.ctx.BlockHeight(), "codeId", wl.codeID, "contractAddress", wl.contractAddress, "count", len(wl.queue), "output", wl.output)
++}
++
++// TXs
++
++type IndexerTxEvent struct {
++	Type            string                `json:"type"`
++	BlockHeight     int64                 `json:"blockHeight"`
++	BlockTimeUnixMs int64                 `json:"blockTimeUnixMs"`
++	TxIndex         uint32                `json:"txIndex"`
++	MessageId       string                `json:"messageId"`
++	ContractAddress string                `json:"contractAddress"`
++	CodeId          uint64                `json:"codeId"`
++	Action          string                `json:"action"`
++	Sender          string                `json:"sender"`
++	Msg             string                `json:"msg"`
++	Reply           *wasmvmtypes.Reply    `json:"reply"`
++	Funds           sdktypes.Coins        `json:"funds"`
++	Response        *wasmvmtypes.Response `json:"response"`
++	GasUsed         uint64                `json:"gasUsed"`
++}
++
++type IndexerTxWriter struct {
++	parentWriter *IndexerTxWriter
++	output       string
++	file         *os.File
++
++	ctx *sdktypes.Context
++	env *wasmvmtypes.Env
++
++	// The message index of the current message within its lineage of messages
++	// will be appended to a string of all message indexes in the lineage
++	// traversed via the parent writer to generate a unique message ID for every
++	// message within a given transaction within a given block. The sub-message
++	// index tracks the sub-writers to give them the appropriate index. The
++	// sub-message index is incremented when each of our sub-writers finishes.
++	messageIndex    uint32
++	subMessageIndex uint32
++}
++
++func NewIndexerTxWriter(config IndexerConfig, parentWriter *IndexerTxWriter, ctx *sdktypes.Context, env *wasmvmtypes.Env) *IndexerTxWriter {
++	// Open output file, creating if doesn't exist.
++	file, err := os.OpenFile(config.Output, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
++	if err != nil {
++		panic(fmt.Errorf("[INDEXER][wasm/tx] Failed to open output file. output=%v, error=%w", config.Output, err))
++	}
++
++	var messageIndex uint32
++	// If we have a parent writer, use its sub message index. Otherwise, use the
++	// root TX-level message index.
++	if parentWriter != nil {
++		messageIndex = parentWriter.subMessageIndex
++	} else {
++		messageIndex = CurrentIndexerTxRootMessageIndex
++	}
++
++	return &IndexerTxWriter{
++		parentWriter: parentWriter,
++		output:       config.Output,
++		file:         file,
++
++		ctx: ctx,
++		env: env,
++
++		messageIndex:    messageIndex,
++		subMessageIndex: 0,
++	}
++}
++
++func (iw *IndexerTxWriter) getMessageId() string {
++	currentMessageId := fmt.Sprintf("%d", iw.messageIndex)
++
++	// If we have a parent writer, append our message index to its message ID.
++	if iw.parentWriter != nil {
++		return iw.parentWriter.getMessageId() + "." + currentMessageId
++	}
++
++	// Otherwise, we are the root writer, so just use our local message ID.
++	return currentMessageId
++}
++
++func (iw *IndexerTxWriter) finish() {
++	// Move the current indexer writer pointer up to our parent. If we are the
++	// root writer, this will be nil.
++	CurrentIndexerTxWriter = iw.parentWriter
++
++	// Increment the parent indexer's sub-message index. If no parent, increment
++	// the root TX-level message index.
++	if iw.parentWriter != nil {
++		iw.parentWriter.subMessageIndex++
++	} else {
++		CurrentIndexerTxRootMessageIndex++
++	}
++
++	// Close file.
++	iw.file.Close()
++}
++
++// Write tx event to file.
++func (iw *IndexerTxWriter) write(contractAddress sdktypes.AccAddress, codeID uint64, action string, sender string, msg *[]byte, reply *wasmvmtypes.Reply, funds sdktypes.Coins, response *wasmvmtypes.Response, gasUsed uint64) {
++	// If checking TX (simulating, not actually executing), do not index.
++	if iw.ctx.IsCheckTx() {
++		return
++	}
++
++	encoder := json.NewEncoder(iw.file)
++
++	// Export event.
++	var msgBase64 string
++	if msg != nil {
++		msgBase64 = base64.StdEncoding.EncodeToString(*msg)
++	}
++	txIndex := uint32(0)
++	if iw.env.Transaction != nil {
++		txIndex = iw.env.Transaction.Index
++	}
++	event := IndexerTxEvent{
++		Type:            "tx",
++		BlockHeight:     iw.ctx.BlockHeight(),
++		BlockTimeUnixMs: iw.ctx.BlockTime().UnixMilli(),
++		TxIndex:         txIndex,
++		MessageId:       iw.getMessageId(),
++		ContractAddress: contractAddress.String(),
++		CodeId:          codeID,
++		Action:          action,
++		Sender:          sender,
++		Msg:             msgBase64,
++		Reply:           reply,
++		Funds:           funds,
++		Response:        response,
++		GasUsed:         gasUsed,
++	}
++	encoder.Encode(event)
++
++	iw.ctx.Logger().Info("[INDEXER][wasm/tx] Exported event", "blockHeight", event.BlockHeight, "txIndex", event.TxIndex, "messageId", event.MessageId, "contractAddress", event.ContractAddress, "sender", event.Sender, "output", iw.output)
++}
++
++// Close file.
++func (iw *IndexerTxWriter) Close() {
++	iw.file.Close()
++}
 diff --git a/x/wasm/keeper/keeper.go b/x/wasm/keeper/keeper.go
-index 16a248e5..861ff899 100644
+index 16a248e5..aa536086 100644
 --- a/x/wasm/keeper/keeper.go
 +++ b/x/wasm/keeper/keeper.go
 @@ -15,6 +15,7 @@ import (
@@ -78,7 +406,7 @@ index 16a248e5..861ff899 100644
  // Keeper will have a reference to Wasmer with it's own data directory.
  type Keeper struct {
  	storeKey              sdk.StoreKey
-@@ -101,6 +111,69 @@ type Keeper struct {
+@@ -101,6 +111,73 @@ type Keeper struct {
  	maxQueryStackSize    uint32
  	acceptedAccountTypes map[reflect.Type]struct{}
  	accountPruner        AccountPruner
@@ -124,14 +452,18 @@ index 16a248e5..861ff899 100644
 +	// index. The appropriate message index (the root-level or a parent's
 +	// sub-message index) will be incremented automatically by the TX writer when
 +	// it finishes.
-+	if CurrentIndexerTxBlockHeight != ctx.BlockHeight() || env.Transaction.Index != CurrentIndexerTxIndex {
++	if CurrentIndexerTxBlockHeight != ctx.BlockHeight() || (env.Transaction != nil && env.Transaction.Index != CurrentIndexerTxIndex) {
 +		CurrentIndexerTxWriter = nil
 +		CurrentIndexerTxRootMessageIndex = 0
 +	}
 +
 +	// Update the current values of the block height and transaction index.
 +	CurrentIndexerTxBlockHeight = ctx.BlockHeight()
-+	CurrentIndexerTxIndex = env.Transaction.Index
++	if env.Transaction != nil {
++		CurrentIndexerTxIndex = env.Transaction.Index
++	} else {
++		CurrentIndexerTxIndex = 0
++	}
 +
 +	// Create TX writer.
 +	txWriter := NewIndexerTxWriter(
@@ -148,7 +480,7 @@ index 16a248e5..861ff899 100644
  }
  
  func (k Keeper) getUploadAccessConfig(ctx sdk.Context) types.AccessConfig {
-@@ -289,14 +362,23 @@ func (k Keeper) instantiate(
+@@ -289,14 +366,23 @@ func (k Keeper) instantiate(
  	// create prefixed data store
  	// 0x03 | BuildContractAddressClassic (sdk.AccAddress)
  	prefixStoreKey := types.GetContractStorePrefix(contractAddress)
@@ -174,7 +506,7 @@ index 16a248e5..861ff899 100644
  	k.consumeRuntimeGas(ctx, gasUsed)
  	if err != nil {
  		return nil, nil, sdkerrors.Wrap(types.ErrInstantiateFailed, err.Error())
-@@ -333,11 +415,21 @@ func (k Keeper) instantiate(
+@@ -333,11 +419,21 @@ func (k Keeper) instantiate(
  		sdk.NewAttribute(types.AttributeKeyCodeID, strconv.FormatUint(codeID, 10)),
  	))
  
@@ -196,7 +528,7 @@ index 16a248e5..861ff899 100644
  	return contractAddress, data, nil
  }
  
-@@ -362,10 +454,19 @@ func (k Keeper) execute(ctx sdk.Context, contractAddress sdk.AccAddress, caller
+@@ -362,10 +458,19 @@ func (k Keeper) execute(ctx sdk.Context, contractAddress sdk.AccAddress, caller
  	env := types.NewEnv(ctx, contractAddress)
  	info := types.NewInfo(caller, coins)
  
@@ -217,7 +549,7 @@ index 16a248e5..861ff899 100644
  	k.consumeRuntimeGas(ctx, gasUsed)
  	if execErr != nil {
  		return nil, sdkerrors.Wrap(types.ErrExecuteFailed, execErr.Error())
-@@ -376,11 +477,21 @@ func (k Keeper) execute(ctx sdk.Context, contractAddress sdk.AccAddress, caller
+@@ -376,11 +481,21 @@ func (k Keeper) execute(ctx sdk.Context, contractAddress sdk.AccAddress, caller
  		sdk.NewAttribute(types.AttributeKeyContractAddr, contractAddress.String()),
  	))
  
@@ -239,7 +571,7 @@ index 16a248e5..861ff899 100644
  	return data, nil
  }
  
-@@ -428,9 +539,19 @@ func (k Keeper) migrate(ctx sdk.Context, contractAddress sdk.AccAddress, caller
+@@ -428,9 +543,19 @@ func (k Keeper) migrate(ctx sdk.Context, contractAddress sdk.AccAddress, caller
  	querier := k.newQueryHandler(ctx, contractAddress)
  
  	prefixStoreKey := types.GetContractStorePrefix(contractAddress)
@@ -261,7 +593,7 @@ index 16a248e5..861ff899 100644
  	k.consumeRuntimeGas(ctx, gasUsed)
  	if err != nil {
  		return nil, sdkerrors.Wrap(types.ErrMigrationFailed, err.Error())
-@@ -449,11 +570,21 @@ func (k Keeper) migrate(ctx sdk.Context, contractAddress sdk.AccAddress, caller
+@@ -449,11 +574,21 @@ func (k Keeper) migrate(ctx sdk.Context, contractAddress sdk.AccAddress, caller
  		sdk.NewAttribute(types.AttributeKeyContractAddr, contractAddress.String()),
  	))
  
@@ -283,7 +615,7 @@ index 16a248e5..861ff899 100644
  	return data, nil
  }
  
-@@ -472,10 +603,19 @@ func (k Keeper) Sudo(ctx sdk.Context, contractAddress sdk.AccAddress, msg []byte
+@@ -472,10 +607,19 @@ func (k Keeper) Sudo(ctx sdk.Context, contractAddress sdk.AccAddress, msg []byte
  
  	env := types.NewEnv(ctx, contractAddress)
  
@@ -304,7 +636,7 @@ index 16a248e5..861ff899 100644
  	k.consumeRuntimeGas(ctx, gasUsed)
  	if execErr != nil {
  		return nil, sdkerrors.Wrap(types.ErrExecuteFailed, execErr.Error())
-@@ -486,11 +626,21 @@ func (k Keeper) Sudo(ctx sdk.Context, contractAddress sdk.AccAddress, msg []byte
+@@ -486,11 +630,21 @@ func (k Keeper) Sudo(ctx sdk.Context, contractAddress sdk.AccAddress, msg []byte
  		sdk.NewAttribute(types.AttributeKeyContractAddr, contractAddress.String()),
  	))
  
@@ -326,7 +658,7 @@ index 16a248e5..861ff899 100644
  	return data, nil
  }
  
-@@ -507,11 +657,20 @@ func (k Keeper) reply(ctx sdk.Context, contractAddress sdk.AccAddress, reply was
+@@ -507,11 +661,20 @@ func (k Keeper) reply(ctx sdk.Context, contractAddress sdk.AccAddress, reply was
  
  	env := types.NewEnv(ctx, contractAddress)
  
@@ -348,7 +680,7 @@ index 16a248e5..861ff899 100644
  	k.consumeRuntimeGas(ctx, gasUsed)
  	if execErr != nil {
  		return nil, sdkerrors.Wrap(types.ErrExecuteFailed, execErr.Error())
-@@ -522,11 +681,21 @@ func (k Keeper) reply(ctx sdk.Context, contractAddress sdk.AccAddress, reply was
+@@ -522,11 +685,21 @@ func (k Keeper) reply(ctx sdk.Context, contractAddress sdk.AccAddress, reply was
  		sdk.NewAttribute(types.AttributeKeyContractAddr, contractAddress.String()),
  	))
  
@@ -370,7 +702,7 @@ index 16a248e5..861ff899 100644
  	return data, nil
  }
  
-@@ -662,7 +831,7 @@ func (k Keeper) QuerySmart(ctx sdk.Context, contractAddr sdk.AccAddress, req []b
+@@ -662,7 +835,7 @@ func (k Keeper) QuerySmart(ctx sdk.Context, contractAddr sdk.AccAddress, req []b
  	querier := k.newQueryHandler(ctx, contractAddr)
  
  	env := types.NewEnv(ctx, contractAddr)
@@ -379,7 +711,7 @@ index 16a248e5..861ff899 100644
  	k.consumeRuntimeGas(ctx, gasUsed)
  	if qErr != nil {
  		return nil, sdkerrors.Wrap(types.ErrQueryFailed, qErr.Error())
-@@ -706,7 +875,7 @@ func (k Keeper) QueryRaw(ctx sdk.Context, contractAddress sdk.AccAddress, key []
+@@ -706,7 +879,7 @@ func (k Keeper) QueryRaw(ctx sdk.Context, contractAddress sdk.AccAddress, key []
  }
  
  // internal helper function
@@ -388,7 +720,7 @@ index 16a248e5..861ff899 100644
  	store := ctx.KVStore(k.storeKey)
  
  	contractBz := store.Get(types.GetContractAddressKey(contractAddress))
-@@ -724,7 +893,7 @@ func (k Keeper) contractInstance(ctx sdk.Context, contractAddress sdk.AccAddress
+@@ -724,7 +897,7 @@ func (k Keeper) contractInstance(ctx sdk.Context, contractAddress sdk.AccAddress
  	k.cdc.MustUnmarshal(codeInfoBz, &codeInfo)
  	prefixStoreKey := types.GetContractStorePrefix(contractAddress)
  	prefixStore := prefix.NewStore(ctx.KVStore(k.storeKey), prefixStoreKey)

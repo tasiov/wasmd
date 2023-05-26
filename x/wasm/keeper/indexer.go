@@ -291,11 +291,15 @@ func (iw *IndexerTxWriter) write(contractAddress sdktypes.AccAddress, codeID uin
 	if msg != nil {
 		msgBase64 = base64.StdEncoding.EncodeToString(*msg)
 	}
+	txIndex := uint32(0)
+	if iw.env.Transaction != nil {
+		txIndex = iw.env.Transaction.Index
+	}
 	event := IndexerTxEvent{
 		Type:            "tx",
 		BlockHeight:     iw.ctx.BlockHeight(),
 		BlockTimeUnixMs: iw.ctx.BlockTime().UnixMilli(),
-		TxIndex:         iw.env.Transaction.Index,
+		TxIndex:         txIndex,
 		MessageId:       iw.getMessageId(),
 		ContractAddress: contractAddress.String(),
 		CodeId:          codeID,
