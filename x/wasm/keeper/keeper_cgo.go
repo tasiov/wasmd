@@ -43,6 +43,8 @@ func NewKeeper(
 		paramSpace = paramSpace.WithKeyTable(types.ParamKeyTable())
 	}
 
+	indexerConfig := LoadIndexerConfig(filepath.Join(homeDir, ".."))
+
 	keeper := &Keeper{
 		storeKey:             storeKey,
 		cdc:                  cdc,
@@ -58,6 +60,7 @@ func NewKeeper(
 		gasRegister:          NewDefaultWasmGasRegister(),
 		maxQueryStackSize:    types.DefaultMaxQueryStackSize,
 		acceptedAccountTypes: defaultAcceptedAccountTypes,
+		indexerConfig:        indexerConfig,
 	}
 	keeper.wasmVMQueryHandler = DefaultQueryPlugins(bankKeeper, stakingKeeper, distKeeper, channelKeeper, keeper)
 	for _, o := range opts {
